@@ -195,6 +195,18 @@ class FlashAttentionBackend(AttentionBackend):
         batch_size = forward_batch.batch_size
         device = seqlens_in_batch.device
 
+        # Sealed SpecStream History slots are deliberately tombstoned in the
+        # normal page table.  Its verifier builds History/Tail metadata itself.
+        specstream_meta = getattr(forward_batch.spec_info, "specstream_meta", None)
+        if (
+            forward_batch.forward_mode.is_target_verify()
+            and specstream_meta is not None
+            and specstream_meta.enabled
+        ):
+            metadata.max_seq_len_q = int(specstream_meta.q_len)
+            self.forward_metadata = metadata
+            return
+
         if forward_batch.forward_mode.is_decode_or_idle():
             # Draft Decode
             if forward_batch.spec_info is not None:
@@ -562,6 +574,30 @@ class FlashAttentionBackend(AttentionBackend):
                 cp_allgather_and_save_kv_cache(
                     forward_batch, layer, k, v, self.attn_cp_size
                 )
+
+        specstream_meta = getattr(forward_batch.spec_info, "specstream_meta", None)
+        if (
+            forward_batch.forward_mode.is_target_verify()
+            and specstream_meta is not None
+            and specstream_meta.enabled
+        ):
+            backend = getattr(self, "specstream_backend", None)
+            if backend is None:
+                raise RuntimeError(
+                    "SpecStream metadata is active but no verifier is installed"
+                )
+            if self.use_mla or self.attn_cp_size > 1:
+                raise RuntimeError(
+                    "SpecStream v1 supports MHA/GQA without context parallelism"
+                )
+            return backend.forward(
+                q=q,
+                k_new=k,
+                v_new=v,
+                forward_batch=forward_batch,
+                meta=specstream_meta,
+                layer=layer,
+            )
 
         # Use precomputed metadata across all layers
         metadata = self.forward_metadata

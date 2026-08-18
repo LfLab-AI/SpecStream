@@ -524,11 +524,37 @@ class ServerArgs:
     spectre_reject_interval: int = 500
     spectre_no_draft_ratio: float = 0.5
     spectre_retry_fail_ratio: float = 0.5
-    spectre_retry_min_count: int = 4
+    spectre_retry_min_count: int = 1
+    spectre_recv_timeout_ms: int = 2000
+    spectre_initial_recv_timeout_ms: int = 10000
+    spectre_fixed_q_mode: Literal["ordinary", "parallel"] = "parallel"
+    spectre_require_draft: bool = False
+    spectre_draft_timeout_action: Literal["fallback", "error"] = "fallback"
     spectre_zmq_addr: str = "127.0.0.1"
     spectre_zmq_port: str = "30009"
     spectre_draft_priority: bool = False
     spectre_max_draft_priority_steps: int = 0
+
+    # SpecStream-SPECTRE target-side KV streaming
+    specstream_enabled: bool = False
+    specstream_profile_only: bool = False
+    specstream_full_restore_baseline: bool = False
+    specstream_reference_attention: bool = True
+    specstream_chunk_tokens: int = 2048
+    specstream_num_buffers: int = 2
+    specstream_chunks_per_transfer: int = 4
+    specstream_active_tail_tokens: int = 512
+    specstream_min_history_tokens: int = 8192
+    specstream_cpu_memory_gb: int = 128
+    specstream_dynamic_q: bool = False
+    specstream_q_candidates: str = "1,2,4,6,8"
+    specstream_q_switch_threshold: float = 0.08
+    specstream_cohort_enabled: bool = False
+    specstream_max_cohort_size: int = 8
+    specstream_max_cohort_delay_us: float = 200.0
+    specstream_profile_path: str = "specstream_profile.csv"
+    specstream_shadow_attention: bool = False
+    specstream_strict_invariants: bool = True
 
     # Expert parallelism
     ep_size: int = 1
@@ -3011,6 +3037,89 @@ class ServerArgs:
         if self.speculative_algorithm == "NEXTN":
             self.speculative_algorithm = "EAGLE"
 
+        # SPECTRE is a pair of independent SGLang services rather than an
+        # in-process EAGLE draft worker, so it does not enter the EAGLE default
+        # selection block below.  Nevertheless CUDA-graph setup and the Target
+        # scheduler both require concrete values.  Normalize them for *both*
+        # roles before either model runner is initialized.
+        if self.speculative_algorithm == "SPECTRE":
+            if self.speculative_num_steps is None:
+                self.speculative_num_steps = 4
+            if self.speculative_eagle_topk is None:
+                self.speculative_eagle_topk = 1
+            if self.speculative_num_draft_tokens is None:
+                self.speculative_num_draft_tokens = self.speculative_num_steps + 1
+            if self.speculative_eagle_topk != 1:
+                raise ValueError(
+                    "SPECTRE currently requires --speculative-eagle-topk 1"
+                )
+            if self.spectre_recv_timeout_ms <= 0:
+                raise ValueError("--spectre-recv-timeout-ms must be positive")
+            if self.spectre_initial_recv_timeout_ms <= 0:
+                raise ValueError(
+                    "--spectre-initial-recv-timeout-ms must be positive"
+                )
+            if self.spectre_retry_min_count < 1:
+                raise ValueError("--spectre-retry-min-count must be at least 1")
+            if not 0.0 <= self.spectre_retry_fail_ratio <= 1.0:
+                raise ValueError(
+                    "--spectre-retry-fail-ratio must be between 0 and 1"
+                )
+            if self.spectre_draft_timeout_action not in ("fallback", "error"):
+                raise ValueError(
+                    "--spectre-draft-timeout-action must be fallback or error"
+                )
+            if (
+                self.spectre_role == "target"
+                and self.spectre_require_draft
+                and not self.skip_server_warmup
+            ):
+                # The generic HTTP warmup is issued before an external Drafter
+                # is guaranteed to be connected.  In fail-fast calibration
+                # mode that ordinary request would otherwise terminate Target
+                # startup after the initial receive timeout.  The documented
+                # workflow performs an explicit SPECTRE smoke request after
+                # both processes are ready.
+                self.skip_server_warmup = True
+                logger.warning(
+                    "Server HTTP warmup is disabled because "
+                    "--spectre-require-draft is enabled. Start Target first, "
+                    "then Drafter, and run the documented explicit smoke test."
+                )
+
+        if self.specstream_enabled or self.specstream_profile_only:
+            from sglang.srt.speculative.spectre.specstream.config import (
+                SpecStreamConfig,
+            )
+
+            if self.speculative_algorithm != "SPECTRE" or self.spectre_role != "target":
+                raise ValueError(
+                    "SpecStream is restricted to the SPECTRE Target process"
+                )
+            if self.page_size != 1:
+                raise ValueError("SpecStream v1 requires --page-size 1")
+            if self.speculative_eagle_topk not in (None, 1):
+                raise ValueError("SpecStream v1 requires --speculative-eagle-topk 1")
+            SpecStreamConfig.from_server_args(self)
+            if not self.disable_radix_cache:
+                self.disable_radix_cache = True
+                logger.warning(
+                    "Radix cache is disabled for SpecStream v1 because sealed CPU "
+                    "History uses an independent Target mapping."
+                )
+            if not self.disable_cuda_graph:
+                self.disable_cuda_graph = True
+                logger.warning(
+                    "CUDA Graph is disabled for SpecStream v1 TARGET_VERIFY because "
+                    "the path contains CPU-to-GPU stream/event operations."
+                )
+            if not self.disable_overlap_schedule:
+                self.disable_overlap_schedule = True
+                logger.warning(
+                    "Overlap scheduling is disabled for SpecStream v1 while tiered "
+                    "KV state is committed by the synchronous SPECTRE worker."
+                )
+
         if self.speculative_algorithm in ("EAGLE", "EAGLE3", "STANDALONE"):
             if self.speculative_algorithm == "STANDALONE" and self.enable_dp_attention:
                 # TODO: support dp attention for standalone speculative decoding
@@ -5015,6 +5124,58 @@ class ServerArgs:
             help="Minimum number of failed requests required to trigger a retry.",
         )
         parser.add_argument(
+            "--spectre-recv-timeout-ms",
+            type=int,
+            default=ServerArgs.spectre_recv_timeout_ms,
+            help=(
+                "Maximum wait for a steady-state remote draft response. "
+                "Long-context SpecStream tests should use a value larger than "
+                "the Drafter prefill/decode latency."
+            ),
+        )
+        parser.add_argument(
+            "--spectre-initial-recv-timeout-ms",
+            type=int,
+            default=ServerArgs.spectre_initial_recv_timeout_ms,
+            help=(
+                "Maximum wait for the first draft of a request and for initial "
+                "Drafter registration."
+            ),
+        )
+        parser.add_argument(
+            "--spectre-fixed-q-mode",
+            type=str,
+            choices=["ordinary", "parallel"],
+            default=ServerArgs.spectre_fixed_q_mode,
+            help=(
+                "Execution mode used when the I/O-aware dynamic controller is "
+                "disabled. ordinary waits for the current draft before verify; "
+                "parallel consumes the pipelined draft from the previous round."
+            ),
+        )
+        parser.add_argument(
+            "--spectre-require-draft",
+            action="store_true",
+            default=ServerArgs.spectre_require_draft,
+            help=(
+                "Require remote-draft attempts for q>1 calibration. Missing "
+                "drafts still use serving-safe fallback unless combined with "
+                "--spectre-draft-timeout-action error."
+            ),
+        )
+        parser.add_argument(
+            "--spectre-draft-timeout-action",
+            type=str,
+            choices=["fallback", "error"],
+            default=ServerArgs.spectre_draft_timeout_action,
+            help=(
+                "Action when one or more remote drafts miss the receive "
+                "deadline. fallback keeps Target alive and performs a "
+                "batch-uniform q=1 round; error is a calibration-only "
+                "fail-fast mode."
+            ),
+        )
+        parser.add_argument(
             "--spectre-draft-priority",
             action="store_true",
             default=ServerArgs.spectre_draft_priority,
@@ -5036,6 +5197,123 @@ class ServerArgs:
                 "request starvation. Only effective when --spectre-draft-priority "
                 "is set."
             ),
+        )
+        parser.add_argument(
+            "--specstream-enabled",
+            action="store_true",
+            default=ServerArgs.specstream_enabled,
+            help="Enable Target-only SpecStream tiered KV verification for SPECTRE.",
+        )
+        parser.add_argument(
+            "--specstream-profile-only",
+            action="store_true",
+            default=ServerArgs.specstream_profile_only,
+            help="Collect SpecStream-compatible profiles without sealing Target KV.",
+        )
+        parser.add_argument(
+            "--specstream-full-restore-baseline",
+            action="store_true",
+            default=ServerArgs.specstream_full_restore_baseline,
+            help="Materialize sealed History per round as the Full-Restore baseline.",
+        )
+        parser.add_argument(
+            "--specstream-reference-attention",
+            action=argparse.BooleanOptionalAction,
+            default=ServerArgs.specstream_reference_attention,
+            help="Use the Torch FP32 online-softmax reference instead of fused Triton.",
+        )
+        parser.add_argument(
+            "--specstream-chunk-tokens",
+            type=int,
+            default=ServerArgs.specstream_chunk_tokens,
+            help="Number of History tokens in one packed CPU/GPU staging chunk.",
+        )
+        parser.add_argument(
+            "--specstream-num-buffers",
+            type=int,
+            default=ServerArgs.specstream_num_buffers,
+            help="Number of bounded GPU History staging buffers.",
+        )
+        parser.add_argument(
+            "--specstream-chunks-per-transfer",
+            type=int,
+            default=ServerArgs.specstream_chunks_per_transfer,
+            help=(
+                "Number of adjacent CPU History chunks grouped behind one "
+                "staging-ready event and one fused attention launch."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-active-tail-tokens",
+            type=int,
+            default=ServerArgs.specstream_active_tail_tokens,
+            help="Minimum recent committed Target KV kept GPU-resident.",
+        )
+        parser.add_argument(
+            "--specstream-min-history-tokens",
+            type=int,
+            default=ServerArgs.specstream_min_history_tokens,
+            help="Minimum sealed prefix required before activating sticky streaming.",
+        )
+        parser.add_argument(
+            "--specstream-cpu-memory-gb",
+            type=int,
+            default=ServerArgs.specstream_cpu_memory_gb,
+            help="Per-Target-rank CPU History memory budget in GiB.",
+        )
+        parser.add_argument(
+            "--specstream-dynamic-q",
+            action="store_true",
+            default=ServerArgs.specstream_dynamic_q,
+            help="Enable batch-level I/O-aware SPECTRE horizon control.",
+        )
+        parser.add_argument(
+            "--specstream-q-candidates",
+            type=str,
+            default=ServerArgs.specstream_q_candidates,
+            help="Comma-separated candidate verification horizons.",
+        )
+        parser.add_argument(
+            "--specstream-q-switch-threshold",
+            type=float,
+            default=ServerArgs.specstream_q_switch_threshold,
+            help="Minimum relative estimated gain required to switch mode or q.",
+        )
+        parser.add_argument(
+            "--specstream-cohort-enabled",
+            action="store_true",
+            default=ServerArgs.specstream_cohort_enabled,
+            help="Enable compatible cross-request History chunk cohorts.",
+        )
+        parser.add_argument(
+            "--specstream-max-cohort-size",
+            type=int,
+            default=ServerArgs.specstream_max_cohort_size,
+            help="Maximum number of requests packed into one chunk cohort.",
+        )
+        parser.add_argument(
+            "--specstream-max-cohort-delay-us",
+            type=float,
+            default=ServerArgs.specstream_max_cohort_delay_us,
+            help="Maximum cohort wait before an item is serviced independently.",
+        )
+        parser.add_argument(
+            "--specstream-profile-path",
+            type=str,
+            default=ServerArgs.specstream_profile_path,
+            help="CSV output path; TP runs append a rank suffix.",
+        )
+        parser.add_argument(
+            "--specstream-shadow-attention",
+            action="store_true",
+            default=ServerArgs.specstream_shadow_attention,
+            help="Run same-input fused-vs-Torch attention diagnostics.",
+        )
+        parser.add_argument(
+            "--specstream-strict-invariants",
+            action=argparse.BooleanOptionalAction,
+            default=ServerArgs.specstream_strict_invariants,
+            help="Fail fast on Target tiered-KV state invariant violations.",
         )
 
         # Expert parallelism

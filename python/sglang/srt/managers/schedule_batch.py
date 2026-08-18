@@ -784,6 +784,17 @@ class Req(ReqDllmMixin):
         self.draft_is_paused: bool = False
         self.draft_tokens_and_logits: Optional[Dict[str, torch.Tensor]] = None
 
+        # SpecStream Target state.  Keep this metadata CPU-only: the authoritative
+        # tensors and CUDA events live in SpecStreamTargetRuntime, never in Req.
+        self.specstream_history_len: int = 0
+        self.specstream_committed_len: int = 0
+        self.specstream_logical_len: int = 0
+        self.specstream_stream_enabled: bool = False
+        self.specstream_round_id: int = 0
+        self.specstream_mode: str = "parallel"
+        self.specstream_q: int = 1
+        self.spectre_force_normal_decode: bool = False
+
         if return_logprob:
             # shape: (bs, 1)
             self.output_token_logprobs_val = []
@@ -1464,6 +1475,14 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     retry_fn: Optional[Callable] = None
     retry_fail_ratio: Optional[float] = None
     retry_min_count: Optional[int] = None
+    specstream_meta: Optional[object] = None
+    specstream_mode: str = "parallel"
+    specstream_decision: Optional[object] = None
+    spectre_requested_q: int = 1
+    spectre_draft_timeout: bool = False
+    spectre_policy_fallback: bool = False
+    spectre_missing_draft_rids: Optional[List[str]] = None
+    spectre_fallback_reason: str = ""
 
     @classmethod
     def init_new(

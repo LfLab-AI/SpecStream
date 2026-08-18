@@ -473,6 +473,14 @@ class SpectreDraftSchedulerMixin:
     def _process_draft_requests(self, latest_msgs: Dict[str, SpectreRequest]) -> None:
         for req_id, draft_req in latest_msgs.items():
             try:
+                if self.tp_rank == 0 and (draft_req.spec_cnt or 0) <= 0:
+                    logger.info(
+                        "[Draft][DraftLink] received initial request rid=%s "
+                        "q=%s input_len=%d",
+                        req_id,
+                        draft_req.num_draft_tokens,
+                        len(draft_req.input_ids or []),
+                    )
                 state = self._get_draft_state(req_id)
 
                 if state is None:
@@ -980,6 +988,14 @@ class SpectreDraftSchedulerMixin:
         if self.tp_size == 1 or self.tp_rank == 0:
             if hasattr(self, "zmq_communicator") and self.zmq_communicator is not None:
                 self.zmq_communicator.send_objs([response])
+                if (req.spec_cnt or 0) <= 0:
+                    logger.info(
+                        "[Draft][DraftLink] sent initial response rid=%s "
+                        "spec_cnt=%s tokens=%d",
+                        req.rid,
+                        req.spec_cnt,
+                        len(draft_tokens),
+                    )
 
         req.draft_generation_start_len = len(req.output_ids)
 

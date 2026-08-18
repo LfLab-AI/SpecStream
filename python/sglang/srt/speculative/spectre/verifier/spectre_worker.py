@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -23,8 +24,16 @@ from sglang.srt.speculative.eagle_utils import (
 )
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.speculative.spec_utils import maybe_detect_nan
+from sglang.srt.speculative.spectre.draft_delivery import (
+    finish_normal_decode_bookkeeping,
+    should_retry_missing_drafts,
+)
 from sglang.srt.speculative.spectre.spectre_protocol import (
     is_health_check_req as _is_health_check,
+)
+from sglang.srt.speculative.spectre.specstream.config import SpecStreamConfig
+from sglang.srt.speculative.spectre.specstream.verifier import (
+    SpecStreamTargetRuntime,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,6 +83,37 @@ class SpectreWorker:
         )
 
         self._cached_tree_structures: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+        self.specstream_runtime = None
+        if server_args.specstream_enabled or server_args.specstream_profile_only:
+            config = SpecStreamConfig.from_server_args(server_args)
+            self.specstream_runtime = SpecStreamTargetRuntime(
+                config=config,
+                model_runner=target_worker.model_runner,
+                req_to_token_pool=self.req_to_token_pool,
+                token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+                tp_rank=tp_rank,
+                tp_size=self.tp_size,
+            )
+            if config.enabled:
+                attn_backend = target_worker.model_runner.attn_backend
+                candidates = [attn_backend]
+                candidates.extend(
+                    backend
+                    for backend in (
+                        getattr(attn_backend, "prefill_backend", None),
+                        getattr(attn_backend, "decode_backend", None),
+                    )
+                    if backend is not None
+                )
+                installed = 0
+                for backend in candidates:
+                    if backend.__class__.__name__ == "FlashAttentionBackend":
+                        backend.specstream_backend = self.specstream_runtime.verifier
+                        installed += 1
+                if not installed:
+                    raise RuntimeError(
+                        "SpecStream v1 requires the fa3/fa4 FlashAttention backend"
+                    )
 
     @property
     def draft_model_runner(self):
@@ -89,11 +129,15 @@ class SpectreWorker:
 
     def clear_cache_pool(self):
         self._cached_tree_structures.clear()
+        if self.specstream_runtime is not None:
+            self.specstream_runtime.clear()
 
     def forward_batch_generation(self, batch: ScheduleBatch) -> GenerationBatchResult:
         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
             logits_output, next_token_ids, _ = self.forward_target_extend(batch)
             self._recv_drafts_after_extend(batch, next_token_ids)
+            if self.specstream_runtime is not None:
+                self.specstream_runtime.after_extend(batch)
             return GenerationBatchResult(
                 logits_output=logits_output,
                 next_token_ids=next_token_ids,
@@ -101,13 +145,66 @@ class SpectreWorker:
                 can_run_cuda_graph=False,
             )
         else:
-            draft_num_tokens = getattr(
-                batch, "draft_num_tokens", self.speculative_num_draft_tokens
-            )
+            draft_num_tokens = getattr(batch, "draft_num_tokens", None)
+            if draft_num_tokens is None:
+                # ScheduleBatch declares this field with a None default.  A
+                # remote Drafter batch is normal autoregressive decoding and
+                # therefore advances one token; only the Target falls back to
+                # its configured verification horizon.
+                draft_num_tokens = (
+                    1
+                    if self.server_args.spectre_role == "draft"
+                    else self.speculative_num_draft_tokens
+                )
+                batch.draft_num_tokens = draft_num_tokens
 
-            if draft_num_tokens == 1 and not batch.forward_mode.is_idle():
+            requires_streaming = (
+                self.specstream_runtime is not None
+                and self.specstream_runtime.batch_requires_streaming(batch)
+            )
+            if (
+                draft_num_tokens == 1
+                and not batch.forward_mode.is_idle()
+                and not requires_streaming
+            ):
                 batch_result = self._forward_normal_decode(batch)
+                if self.specstream_runtime is not None:
+                    self.specstream_runtime.after_normal_decode(batch, batch_result)
                 return batch_result
+
+            # Ordinary SPECTRE waits for this round's draft before verification;
+            # parallel mode keeps the original overlap and receives after Target.
+            if getattr(batch, "specstream_mode", "parallel") == "ordinary":
+                recv_draft_fn = getattr(batch, "recv_draft_fn", None)
+                if recv_draft_fn is not None:
+                    fresh = recv_draft_fn(batch)
+                    batch.recv_draft_fn = None
+                    missing_rids = set(
+                        getattr(batch, "spectre_missing_draft_rids", ()) or ()
+                    )
+                    if missing_rids:
+                        # Target verification is batch-uniform in q.  Mixing
+                        # q>1 requests with timeout fallbacks would either pad
+                        # fake draft tokens or require a different packed tree.
+                        # Fall back the whole batch to one exact Target query.
+                        for req in batch.reqs:
+                            _apply_drafts_to_req(req, -1, None, skip_d0=False)
+                            req.spectre_force_normal_decode = False
+                        draft_num_tokens = 1
+                        batch.draft_num_tokens = 1
+                        batch.specstream_mode = "ordinary"
+                        if not requires_streaming and not batch.forward_mode.is_idle():
+                            batch_result = self._forward_normal_decode(batch)
+                            if self.specstream_runtime is not None:
+                                self.specstream_runtime.after_normal_decode(
+                                    batch, batch_result
+                                )
+                            return batch_result
+                    else:
+                        for req in batch.reqs:
+                            _apply_drafts_to_req(
+                                req, -1, fresh.get(req.rid), skip_d0=False
+                            )
 
             spec_steps = max(draft_num_tokens - 1, 1)
             spec_info = self.construct_draft_input(batch, draft_num_tokens, spec_steps)
@@ -295,7 +392,15 @@ class SpectreWorker:
         retry_min_count: int = 4,
     ):
         spec_info.prepare_for_verify(batch, self.page_size)
-        spec_info.num_tokens_per_req = spec_info.spec_steps + 1
+        specstream_meta = None
+        if self.specstream_runtime is not None and not batch.forward_mode.is_idle():
+            specstream_meta = self.specstream_runtime.build_round_meta(
+                batch, spec_info, getattr(batch, "specstream_mode", "parallel")
+            )
+        # ``draft_token_num`` is the actual batch-uniform verify width.  It is
+        # normally ``spec_steps + 1``, but the timeout fallback deliberately
+        # uses q=1 while retaining a one-step tree object for compatibility.
+        spec_info.num_tokens_per_req = spec_info.draft_token_num
         batch.return_hidden_states = False
         batch.forward_mode = (
             ForwardMode.TARGET_VERIFY
@@ -309,13 +414,22 @@ class SpectreWorker:
         )
         assert model_worker_batch.capture_hidden_mode == spec_info.capture_hidden_mode
 
+        started = time.perf_counter()
         batch_result = self.target_worker.forward_batch_generation(
             model_worker_batch, is_verify=True
         )
+        if self.specstream_runtime is not None:
+            self.specstream_runtime.record_target_forward(
+                specstream_meta, (time.perf_counter() - started) * 1000
+            )
         logits_output, can_run_cuda_graph = (
             batch_result.logits_output,
             batch_result.can_run_cuda_graph,
         )
+        if self.specstream_runtime is not None:
+            self.specstream_runtime.record_logit_margin(
+                specstream_meta, logits_output.next_token_logits
+            )
 
         if self.enable_nan_detection:
             maybe_detect_nan(
@@ -327,6 +441,12 @@ class SpectreWorker:
         new_drafts_per_req: dict = {}
         if recv_draft_fn is not None and not batch.forward_mode.is_idle():
             new_drafts_per_req = recv_draft_fn(batch)
+            if getattr(batch, "spectre_draft_timeout", False):
+                # The receive deadline already established Drafter overload.
+                # A synchronous retry would add another half-timeout to the
+                # same critical path; subsequent batches enter q=1 backoff
+                # before the controller probes the Drafter again.
+                retry_fn = None
 
         spec_info.hidden_states = logits_output.hidden_states
 
@@ -337,11 +457,16 @@ class SpectreWorker:
             self.page_size,
             vocab_mask=None,
         )
+        if self.specstream_runtime is not None and specstream_meta is not None:
+            self.specstream_runtime.after_verify(batch, res, specstream_meta)
 
         self._post_verify_update_drafts(
             batch,
             res,
             new_drafts_per_req,
+            ordinary_mode=(
+                getattr(batch, "specstream_mode", "parallel") == "ordinary"
+            ),
             retry_fn=retry_fn,
             retry_fail_ratio=retry_fail_ratio,
             retry_min_count=retry_min_count,
@@ -363,10 +488,26 @@ class SpectreWorker:
         batch: ScheduleBatch,
         res: EagleVerifyOutput,
         new_drafts_per_req: dict,
+        ordinary_mode: bool = False,
         retry_fn=None,
         retry_fail_ratio: float = 0.0,
         retry_min_count: int = 4,
     ):
+        if ordinary_mode:
+            # The current-round draft was synchronously received and consumed
+            # before TARGET_VERIFY.  There is intentionally no pipelined
+            # next-round draft to reconcile here; treating that absence as a
+            # failure would clear valid state, issue a redundant retry, and
+            # advance spec_cnt twice.
+            for req in batch.reqs:
+                if _is_health_check(req):
+                    continue
+                req.cur_drafts = []
+                req.draft_tokens_and_logits = _default_draft()
+                req.spec_cnt += 1
+                req.len_output_ids = len(req.output_ids)
+            return
+
         failed_reqs: List = []
 
         for i, req in enumerate(batch.reqs):
@@ -405,12 +546,11 @@ class SpectreWorker:
             req.len_output_ids = len(req.output_ids)
 
         bsz = sum(1 for req in batch.reqs if not _is_health_check(req))
-        should_retry = (
-            retry_fn is not None
-            and failed_reqs
-            and bsz > 0
-            and bsz > retry_min_count
-            and len(failed_reqs) / bsz > retry_fail_ratio
+        should_retry = retry_fn is not None and should_retry_missing_drafts(
+            failed_count=len(failed_reqs),
+            batch_size=bsz,
+            retry_fail_ratio=retry_fail_ratio,
+            retry_min_count=retry_min_count,
         )
         if should_retry:
             retry_drafts = retry_fn(failed_reqs)
@@ -470,8 +610,7 @@ class SpectreWorker:
 
         next_token_ids_list = batch_result.next_token_ids.tolist()
         for i, req in enumerate(batch.reqs):
-            if _is_health_check(req):
-                continue
+            is_health_check = _is_health_check(req)
             token = next_token_ids_list[i] if i < len(next_token_ids_list) else None
             if token is not None:
                 req.output_ids.append(token)
@@ -483,14 +622,22 @@ class SpectreWorker:
                             f"\033[36m [NormalDecode] grammar.accept_token failed "
                             f"for req {req.rid} token {token} \033[0m"
                         )
-            _apply_drafts_to_req(
-                req,
+                req.check_finished()
+            # Health/warmup requests still need normal token and finish-state
+            # updates.  They only bypass remote-draft bookkeeping; skipping the
+            # whole loop leaves one request decoding until the context limit.
+            if is_health_check:
+                req.len_output_ids = len(req.output_ids)
+                continue
+            finish_normal_decode_bookkeeping(
+                req=req,
+                server_role=self.server_args.spectre_role,
                 verified_token=token if token is not None else -1,
-                drafts=new_drafts_per_req.get(req.rid) if new_drafts_per_req else None,
-                skip_d0=True,
+                drafts=(
+                    new_drafts_per_req.get(req.rid) if new_drafts_per_req else None
+                ),
+                apply_drafts=_apply_drafts_to_req,
             )
-            req.spec_cnt += 1
-            req.len_output_ids = len(req.output_ids)
 
         return GenerationBatchResult(
             logits_output=batch_result.logits_output,

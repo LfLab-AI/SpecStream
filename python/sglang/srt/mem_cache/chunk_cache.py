@@ -71,6 +71,11 @@ class ChunkCache(BasePrefixCache):
         kv_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, :kv_committed_len
         ]
+        # SpecStream seals committed prefixes to CPU and tombstones their page
+        # table entries with slot 0.  Slot 0 is allocator-reserved and must
+        # never be inserted into the free list during finish/retraction.
+        if getattr(req, "specstream_stream_enabled", False):
+            kv_indices = kv_indices[kv_indices != 0]
         self.token_to_kv_pool_allocator.free(kv_indices)
 
     def cache_unfinished_req(self, req: Req, chunked=False):

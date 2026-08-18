@@ -8,6 +8,10 @@ from typing import Dict, List, Optional, Set, Tuple
 from sglang.srt.environ import envs
 from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
+from sglang.srt.speculative.spectre.draft_delivery import (
+    choose_ready_verify_horizon,
+    should_fail_fast_on_draft_timeout,
+)
 from sglang.srt.speculative.spectre.spectre_protocol import (
     SpectreAction,
     SpectreRequest,
@@ -92,7 +96,22 @@ class DraftCircuitBreaker:
 class SchedulerSpectreTargetMixin:
     def _init_draft_recv_infra(self):
         self._recv_timeout_s = (
-            float(os.environ.get("SPECTRE_RECV_TIMEOUT_MS", "200")) / 1000.0
+            float(
+                os.environ.get(
+                    "SPECTRE_RECV_TIMEOUT_MS",
+                    str(self.server_args.spectre_recv_timeout_ms),
+                )
+            )
+            / 1000.0
+        )
+        self._initial_recv_timeout_s = (
+            float(
+                os.environ.get(
+                    "SPECTRE_INITIAL_RECV_TIMEOUT_MS",
+                    str(self.server_args.spectre_initial_recv_timeout_ms),
+                )
+            )
+            / 1000.0
         )
         self._msg_buffer: List[SpectreRequest] = []
         self._msg_lock = threading.Lock()
@@ -205,20 +224,44 @@ class SchedulerSpectreTargetMixin:
             self.cur_batch = batch
 
             if batch:
+                batch.spectre_draft_timeout = False
+                batch.spectre_policy_fallback = False
+                batch.spectre_missing_draft_rids = []
+                batch.spectre_fallback_reason = ""
                 if self._is_self_high_overhead_target(batch):
-                    batch.draft_num_tokens = 1
-                    batch.recv_draft_fn = None
+                    self._configure_q1_fallback(batch, "target_high_overhead")
                 elif not self.draft_circuit_breaker.should_send():
-                    batch.draft_num_tokens = 1
-                    batch.recv_draft_fn = None
+                    self._configure_q1_fallback(batch, "draft_circuit_open")
+                elif self._consume_request_timeout_fallback(batch):
+                    self._configure_q1_fallback(batch, "previous_draft_timeout")
                 else:
                     draft_num_tokens = self._decide_speculative_num_draft_tokens(batch)
-                    self.send_batch_draft_requests(batch, draft_num_tokens)
-                    batch.draft_num_tokens = self._decide_verify_num_draft_tokens(batch)
-                    batch.recv_draft_fn = self.recv_drafts_for_batch
-                    batch.retry_fn = self.retry_drafts_for_reqs
-                    batch.retry_fail_ratio = self.server_args.spectre_retry_fail_ratio
-                    batch.retry_min_count = self.server_args.spectre_retry_min_count
+                    # Keep the controller/configured horizon separate from the
+                    # horizon that can be verified immediately.  Parallel mode
+                    # may temporarily verify q=1 while waiting for its first
+                    # pipelined response; diagnostics must still know that the
+                    # requested q was greater than one.
+                    batch.spectre_requested_q = draft_num_tokens
+                    if draft_num_tokens <= 1:
+                        reason = getattr(
+                            getattr(batch, "specstream_decision", None),
+                            "reason",
+                            "controller_q1",
+                        )
+                        self._configure_q1_fallback(batch, reason)
+                    else:
+                        self.send_batch_draft_requests(batch, draft_num_tokens)
+                        batch.draft_num_tokens = (
+                            self._decide_verify_num_draft_tokens(batch)
+                        )
+                        batch.recv_draft_fn = self.recv_drafts_for_batch
+                        batch.retry_fn = self.retry_drafts_for_reqs
+                        batch.retry_fail_ratio = (
+                            self.server_args.spectre_retry_fail_ratio
+                        )
+                        batch.retry_min_count = (
+                            self.server_args.spectre_retry_min_count
+                        )
 
                 result = self.run_batch(batch)
                 self.process_batch_result(batch, result)
@@ -228,6 +271,26 @@ class SchedulerSpectreTargetMixin:
             self.last_batch = batch
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.self_check_during_busy()
+
+    def _configure_q1_fallback(self, batch: ScheduleBatch, reason: str) -> None:
+        """Configure one batch-uniform AR/q=1 round without contacting Draft."""
+        batch.spectre_requested_q = 1
+        batch.draft_num_tokens = 1
+        batch.recv_draft_fn = None
+        batch.retry_fn = None
+        batch.retry_fail_ratio = 0.0
+        batch.retry_min_count = 1
+        batch.specstream_mode = "ordinary"
+        batch.spectre_policy_fallback = True
+        batch.spectre_fallback_reason = str(reason)
+
+    def _consume_request_timeout_fallback(self, batch: ScheduleBatch) -> bool:
+        forced = False
+        for req in batch.reqs:
+            if getattr(req, "spectre_force_normal_decode", False):
+                forced = True
+                req.spectre_force_normal_decode = False
+        return forced
 
     def _collect_draft_messages(
         self,
@@ -347,7 +410,14 @@ class SchedulerSpectreTargetMixin:
         ]
 
     def recv_drafts_for_batch(self, batch: ScheduleBatch) -> dict:
+        specstream_started = time.perf_counter()
+        batch.spectre_draft_timeout = False
+        batch.spectre_missing_draft_rids = []
         reqs_waiting_for_drafts = self._get_reqs_waiting_for_drafts(batch)
+        is_initial_round = any(req.spec_cnt <= 0 for req in reqs_waiting_for_drafts)
+        timeout_s = (
+            self._initial_recv_timeout_s if is_initial_round else self._recv_timeout_s
+        )
 
         if self.tp_size == 1 or self.tp_rank == 0:
             pending_rids = {
@@ -365,7 +435,7 @@ class SchedulerSpectreTargetMixin:
                         if req.spec_cnt in self.req_to_draft_token.get(req.rid, {})
                         and self.req_to_draft_token[req.rid][req.spec_cnt] is None
                     },
-                    timeout_s=self._recv_timeout_s,
+                    timeout_s=timeout_s,
                 )
                 if pending_rids
                 else []
@@ -378,11 +448,69 @@ class SchedulerSpectreTargetMixin:
         self._store_messages(messages)
 
         result = self._build_result_from_cache(reqs_waiting_for_drafts)
+        missing_reqs: List[Req] = []
+        fail_fast_message: Optional[str] = None
         if reqs_waiting_for_drafts:
-            if result:
+            missing_reqs = [
+                req for req in reqs_waiting_for_drafts if req.rid not in result
+            ]
+            if not missing_reqs:
                 self.draft_circuit_breaker.record_success()
             else:
                 self.draft_circuit_breaker.record_failure()
+                requested_q = int(
+                    getattr(
+                        batch,
+                        "spectre_requested_q",
+                        getattr(batch, "draft_num_tokens", 1),
+                    )
+                    or 1
+                )
+                missing = [req.rid for req in missing_reqs]
+                batch.spectre_draft_timeout = True
+                batch.spectre_missing_draft_rids = missing
+                batch.spectre_fallback_reason = "remote_draft_timeout"
+                for req in missing_reqs:
+                    # Ordinary mode consumes this marker in the current worker
+                    # call. Parallel/extend mode consumes it on the next batch.
+                    req.spectre_force_normal_decode = True
+                if self.tp_rank == 0:
+                    logger.warning(
+                        "[Target][DraftFallback] q=%d missing=%d/%d after "
+                        "%.0f ms; using a batch-uniform q=1 round; rids=%s",
+                        requested_q,
+                        len(missing_reqs),
+                        len(reqs_waiting_for_drafts),
+                        timeout_s * 1000,
+                        missing,
+                    )
+                if (
+                    requested_q > 1
+                    and should_fail_fast_on_draft_timeout(
+                        require_draft=self.server_args.spectre_require_draft,
+                        timeout_action=self.server_args.spectre_draft_timeout_action,
+                    )
+                ):
+                    fail_fast_message = (
+                        "SPECTRE required a remote draft for q="
+                        f"{requested_q}, but no valid response arrived within "
+                        f"{timeout_s * 1000:.0f} ms; missing_rids={missing}. "
+                        "Check Drafter readiness/ZMQ and increase "
+                        "--spectre-recv-timeout-ms or "
+                        "--spectre-initial-recv-timeout-ms."
+                    )
+        elapsed_ms = (time.perf_counter() - specstream_started) * 1000
+        runtime = self._get_specstream_runtime()
+        if runtime is not None:
+            runtime.record_network_wait(elapsed_ms)
+            runtime.record_draft_result(
+                elapsed_ms=elapsed_ms,
+                timeout_ms=timeout_s * 1000,
+                missing_count=len(missing_reqs),
+                total_count=len(reqs_waiting_for_drafts),
+            )
+        if fail_fast_message is not None:
+            raise RuntimeError(fail_fast_message)
         return result
 
     def retry_drafts_for_reqs(self, failed_reqs: List[Req]) -> dict:
@@ -473,7 +601,15 @@ class SchedulerSpectreTargetMixin:
                             grammar=None,
                         )
                     )
-                self._zmq_send(draft_reqs)
+                if draft_reqs:
+                    batch.spectre_draft_request_sent = self._zmq_send(
+                        draft_reqs,
+                        wait_for_identity_s=(
+                            self._initial_recv_timeout_s
+                            if any(req.spec_cnt <= 0 for req in reqs_to_send)
+                            else 0.0
+                        ),
+                    )
 
     def _send_retry_requests(
         self, failed_reqs: List[Req], num_draft_tokens: int
@@ -500,14 +636,28 @@ class SchedulerSpectreTargetMixin:
         if reqs_to_send:
             self._zmq_send(reqs_to_send)
 
-    def _zmq_send(self, reqs: List[SpectreRequest]) -> None:
+    def _zmq_send(
+        self, reqs: List[SpectreRequest], wait_for_identity_s: float = 0.0
+    ) -> bool:
+        deadline = time.perf_counter() + max(float(wait_for_identity_s), 0.0)
         all_drafts_identity = self.zmq_communicator.get_all_drafts_identity()
+        while not all_drafts_identity and time.perf_counter() < deadline:
+            time.sleep(0.01)
+            all_drafts_identity = self.zmq_communicator.get_all_drafts_identity()
         if not all_drafts_identity:
             logger.warning(
                 "\033[32m [Target] No draft available, check draft status! \033[0m"
             )
-            return
+            return False
+        if wait_for_identity_s > 0.0 and self.tp_rank == 0:
+            logger.info(
+                "[Target][DraftLink] registered=%s; sending %d initial "
+                "request(s)",
+                all_drafts_identity[0],
+                len(reqs),
+            )
         self.zmq_communicator.send_objs(reqs, all_drafts_identity[0])
+        return True
 
     def notify_draft_request_finished_or_aborted(
         self, req: Req, action: SpectreAction
@@ -539,6 +689,9 @@ class SchedulerSpectreTargetMixin:
                     f"\033[34m [Target][Notify] Failed to cleanup req_to_draft_token "
                     f"for {req.rid}: {e} \033[0m"
                 )
+        runtime = self._get_specstream_runtime()
+        if runtime is not None:
+            runtime.release_request(req.rid)
 
     def _is_self_high_overhead_target(self, batch: ScheduleBatch) -> bool:
         current_bsz = max(batch.batch_size(), self.running_batch.batch_size())
@@ -549,6 +702,24 @@ class SchedulerSpectreTargetMixin:
         return False
 
     def _decide_speculative_num_draft_tokens(self, batch: ScheduleBatch) -> int:
+        batch.specstream_rejected = bool(self.is_rejected)
+        if self.is_rejected:
+            batch.specstream_mode = "ordinary"
+            return 1
+        runtime = self._get_specstream_runtime()
+        if runtime is not None and runtime.controller is not None:
+            decision = runtime.choose_decision(batch) if self.tp_rank == 0 else None
+            if self.tp_size > 1:
+                decision = broadcast_pyobj(
+                    decision,
+                    self.tp_group.rank,
+                    self.tp_cpu_group,
+                    src=self.tp_group.ranks[0],
+                )
+            batch.specstream_decision = decision
+            batch.specstream_mode = decision.mode
+            return int(decision.q)
+        batch.specstream_mode = self.server_args.spectre_fixed_q_mode
         return self.server_args.speculative_num_steps + 1
 
     def process_reject_action(self) -> None:
@@ -564,10 +735,27 @@ class SchedulerSpectreTargetMixin:
                 logger.info("\033[34m [Target] draft_num_tokens=1 (rejected) \033[0m")
             return 1
 
+        # Ordinary mode intentionally waits for the draft in SpectreWorker
+        # immediately before constructing TARGET_VERIFY.  At this point the
+        # just-requested draft is therefore not yet present in req.cur_drafts;
+        # applying the parallel-mode no-draft gate here would force every
+        # ordinary round to q=1 and make the later wait unreachable.
         no_draft_reqs = sum(
             1 for req in batch.reqs if not _is_health_check(req) and not req.cur_drafts
         )
         bs = batch.batch_size()
-        if bs > 0 and no_draft_reqs / bs > self.server_args.spectre_no_draft_ratio:
-            return 1
-        return self.server_args.speculative_num_draft_tokens
+        return choose_ready_verify_horizon(
+            mode=getattr(batch, "specstream_mode", "parallel"),
+            requested_q=getattr(
+                batch,
+                "spectre_requested_q",
+                self.server_args.speculative_num_draft_tokens,
+            ),
+            batch_size=bs,
+            no_draft_count=no_draft_reqs,
+            no_draft_ratio=self.server_args.spectre_no_draft_ratio,
+        )
+
+    def _get_specstream_runtime(self):
+        draft_worker = getattr(self, "draft_worker", None)
+        return getattr(draft_worker, "specstream_runtime", None)
