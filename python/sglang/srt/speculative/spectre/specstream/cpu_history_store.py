@@ -36,11 +36,20 @@ class SealTicket:
     block_ids: list[int]
     event: torch.cuda.Event | None
     pending_sources: list[torch.Tensor]
+    dependency_event: torch.cuda.Event | None = None
+    completed: bool = False
+
+    def is_ready(self) -> bool:
+        """Return without synchronizing the CPU scheduler thread."""
+
+        return self.completed or self.event is None or bool(self.event.query())
 
     def wait_safe_to_free(self) -> None:
         if self.event is not None:
             self.event.synchronize()
         self.pending_sources.clear()
+        self.dependency_event = None
+        self.completed = True
 
 
 class CPUHistoryStore:
@@ -72,6 +81,14 @@ class CPUHistoryStore:
         self.head_dim = int(head_dim)
         self.dtype = dtype
         self.device = torch.device(device)
+        # D2H sealing is deliberately isolated from the Target compute stream.
+        # A producer event below orders KV writes before this stream consumes
+        # them, while the scheduler can immediately continue the next round.
+        self.d2h_stream = (
+            torch.cuda.Stream(device=self.device)
+            if self.device.type == "cuda" and torch.cuda.is_available()
+            else None
+        )
         self._next_id = count()
         self._slabs: dict[int, _PackedSlab] = {}
         self._request_slabs: dict[str, list[int]] = {}
@@ -135,56 +152,110 @@ class CPUHistoryStore:
             slots = slots.to(self.device)
 
         block_ids: list[int] = []
-        pending_sources: list[torch.Tensor] = []
-        final_event = None
+        slabs_to_fill: list[tuple[_PackedSlab, int, int]] = []
         cursor = 0
         total = int(slots.numel())
         while cursor < total:
             take = min(self.chunk_tokens, total - cursor)
             slab_id, slab = self._allocate_slab(rid, abs_start + cursor)
-            slab_slots = slots[cursor : cursor + take].long()
-            use_async = bool(slab.pinned and slab_slots.is_cuda)
-            for layer_offset, layer_id in enumerate(self.layer_ids):
-                key = token_to_kv_pool.get_key_buffer(layer_id).index_select(
-                    0, slab_slots
-                )
-                value = token_to_kv_pool.get_value_buffer(layer_id).index_select(
-                    0, slab_slots
-                )
-                if key.shape != value.shape:
-                    raise ValueError(
-                        "SpecStream packed History currently requires matching K/V shapes"
-                    )
-                packed = torch.stack((key, value), dim=1).contiguous()
-                if packed.shape[1:] != (
-                    2,
-                    self.kv_heads,
-                    self.head_dim,
-                ):
-                    raise ValueError(
-                        "Target KV geometry changed while sealing SpecStream History"
-                    )
-                slab.tensor[layer_offset, :take].copy_(packed, non_blocking=use_async)
-                if use_async:
-                    pending_sources.append(packed)
-            slab.used_tokens = take
-            self.bytes_used += (
-                take
-                * len(self.layer_ids)
-                * 2
-                * self.kv_heads
-                * self.head_dim
-                * torch.empty((), dtype=self.dtype).element_size()
-            )
             block_ids.append(slab_id)
+            slabs_to_fill.append((slab, cursor, take))
             cursor += take
 
-        if pending_sources:
-            final_event = torch.cuda.Event()
-            final_event.record(torch.cuda.current_stream(self.device))
-            self._slabs[block_ids[-1]].ready_event = final_event
-            self._slabs[block_ids[-1]].pending_sources = pending_sources
-        return SealTicket(block_ids, final_event, pending_sources)
+        pending_sources: list[torch.Tensor] = []
+        dependency_event = None
+        final_event = None
+        use_async = bool(
+            self.d2h_stream is not None
+            and slots.is_cuda
+            and all(slab.pinned for slab, _, _ in slabs_to_fill)
+        )
+
+        def enqueue_copies(*, non_blocking: bool) -> None:
+            for slab, source_offset, take in slabs_to_fill:
+                slab_slots = slots[source_offset : source_offset + take].long()
+                for layer_offset, layer_id in enumerate(self.layer_ids):
+                    key = token_to_kv_pool.get_key_buffer(layer_id).index_select(
+                        0, slab_slots
+                    )
+                    value = token_to_kv_pool.get_value_buffer(layer_id).index_select(
+                        0, slab_slots
+                    )
+                    if key.shape != value.shape:
+                        raise ValueError(
+                            "SpecStream packed History currently requires matching "
+                            "K/V shapes"
+                        )
+                    packed = torch.stack((key, value), dim=1).contiguous()
+                    if packed.shape[1:] != (
+                        2,
+                        self.kv_heads,
+                        self.head_dim,
+                    ):
+                        raise ValueError(
+                            "Target KV geometry changed while sealing SpecStream "
+                            "History"
+                        )
+                    slab.tensor[layer_offset, :take].copy_(
+                        packed, non_blocking=non_blocking
+                    )
+                    if non_blocking:
+                        # Keep the gather/pack temporaries alive until the D2H
+                        # completion event is observed by complete_seal().
+                        pending_sources.append(packed)
+
+                slab.used_tokens = take
+                self.bytes_used += (
+                    take
+                    * len(self.layer_ids)
+                    * 2
+                    * self.kv_heads
+                    * self.head_dim
+                    * torch.empty((), dtype=self.dtype).element_size()
+                )
+
+        if use_async:
+            dependency_event = torch.cuda.Event()
+            dependency_event.record(torch.cuda.current_stream(self.device))
+            with torch.cuda.stream(self.d2h_stream):
+                self.d2h_stream.wait_event(dependency_event)
+                enqueue_copies(non_blocking=True)
+                final_event = torch.cuda.Event()
+                final_event.record(self.d2h_stream)
+        else:
+            enqueue_copies(non_blocking=False)
+
+        for slab, _, _ in slabs_to_fill:
+            slab.ready_event = final_event
+        if slabs_to_fill:
+            slabs_to_fill[-1][0].pending_sources = pending_sources
+        return SealTicket(
+            block_ids,
+            final_event,
+            pending_sources,
+            dependency_event=dependency_event,
+        )
+
+    def complete_seal(self, ticket: SealTicket, *, wait: bool = False) -> bool:
+        """Retire a D2H ticket without blocking unless explicitly requested."""
+
+        if ticket.completed:
+            return True
+        if ticket.event is not None:
+            if wait:
+                ticket.event.synchronize()
+            elif not ticket.event.query():
+                return False
+        ticket.pending_sources.clear()
+        ticket.dependency_event = None
+        for block_id in ticket.block_ids:
+            slab = self._slabs.get(block_id)
+            if slab is not None:
+                slab.ready_event = None
+                slab.pending_sources.clear()
+        ticket.event = None
+        ticket.completed = True
+        return True
 
     def iter_layer_chunks(
         self,

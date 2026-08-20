@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 import math
 import time
@@ -19,7 +20,10 @@ from sglang.srt.speculative.spectre.specstream.controller import (
     SpecStreamDecision,
 )
 from sglang.srt.speculative.spectre.specstream.cost_model import SpecStreamBatchState
-from sglang.srt.speculative.spectre.specstream.cpu_history_store import CPUHistoryStore
+from sglang.srt.speculative.spectre.specstream.cpu_history_store import (
+    CPUHistoryStore,
+    SealTicket,
+)
 from sglang.srt.speculative.spectre.specstream.diagnostics import (
     SpecStreamDiagnostics,
 )
@@ -35,6 +39,7 @@ from sglang.srt.speculative.spectre.specstream.round_meta import (
     SpecStreamRoundMeta,
 )
 from sglang.srt.speculative.spectre.specstream.staging_runtime import (
+    StagingTransfer,
     StagingWindowPool,
 )
 from sglang.srt.speculative.spectre.specstream.state import TargetTieredKVState
@@ -47,6 +52,16 @@ from sglang.srt.speculative.spectre.specstream.triton_stream_attn import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _PendingSeal:
+    rid: str
+    req_pool_idx: int
+    history_start: int
+    seal_end: int
+    slots: torch.Tensor
+    ticket: SealTicket
 
 
 def _group_adjacent_chunks(chunks, group_size: int):
@@ -86,8 +101,20 @@ class SpecStreamVerifier:
         self.staging = staging
         self.profiler = profiler
         self.diagnostics = diagnostics
+        # Single-request B3 can safely retain both bounded staging slots across
+        # transformer layers.  Copies for layer L+1 are queued while layer L's
+        # tail attention and MLP are still running.
+        self._single_layer_prefetch: dict[
+            tuple[int, str, int], dict[int, StagingTransfer]
+        ] = {}
 
     def forward(self, *, q, k_new, v_new, forward_batch, meta, layer):
+        if self._single_layer_prefetch:
+            stale_keys = [
+                key for key in self._single_layer_prefetch if key[0] != meta.round_id
+            ]
+            for key in stale_keys:
+                del self._single_layer_prefetch[key]
         if layer.is_cross_attention:
             raise RuntimeError("SpecStream does not support cross attention")
         if layer.sliding_window_size is not None and layer.sliding_window_size > -1:
@@ -125,9 +152,15 @@ class SpecStreamVerifier:
         elif meta.cohort_enabled and len(stream_items) > 1:
             self._stream_history_cohorts(stream_items, queries, states, meta, layer)
         else:
+            allow_layer_prefetch = self.config.layer_prefetch and len(stream_items) == 1
             for item in stream_items:
                 states[item.rid] = self._stream_history_single(
-                    item, queries[item.rid], states[item.rid], meta, layer
+                    item,
+                    queries[item.rid],
+                    states[item.rid],
+                    meta,
+                    layer,
+                    prefetch_next_layer=allow_layer_prefetch,
                 )
 
         output = torch.empty(
@@ -248,7 +281,9 @@ class SpecStreamVerifier:
             )
         return updated
 
-    def _stream_history_single(self, item, query, state, meta, layer):
+    def _stream_history_single(
+        self, item, query, state, meta, layer, *, prefetch_next_layer: bool = False
+    ):
         chunks = list(
             self.history_store.iter_layer_chunks(
                 item.rid, layer.layer_id, history_end=item.history_len
@@ -266,12 +301,14 @@ class SpecStreamVerifier:
             1 if self.config.reference_attention else self.config.chunks_per_transfer
         )
         chunk_groups = _group_adjacent_chunks(chunks, group_size)
-        transfers = {}
+        prefetch_key = (meta.round_id, item.rid, int(layer.layer_id))
+        transfers = self._single_layer_prefetch.pop(prefetch_key, {})
         for index in range(min(self.staging.num_buffers, len(chunk_groups))):
-            transfers[index] = self.staging.submit_many(
-                [chunk.tensor for chunk in chunk_groups[index]],
-                index,
-            )
+            if index not in transfers:
+                transfers[index] = self.staging.submit_many(
+                    [chunk.tensor for chunk in chunk_groups[index]],
+                    index,
+                )
 
         for index, chunk_group in enumerate(chunk_groups):
             transfer = transfers.pop(index)
@@ -295,7 +332,43 @@ class SpecStreamVerifier:
                     [chunk.tensor for chunk in chunk_groups[next_index]],
                     transfer.slot,
                 )
+        if prefetch_next_layer and not self.config.reference_attention:
+            self._prefetch_next_single_layer(item, meta, layer)
         return state
+
+    def _prefetch_next_single_layer(self, item, meta, layer) -> None:
+        try:
+            layer_offset = self.history_store.layer_ids.index(int(layer.layer_id))
+        except ValueError:
+            return
+        next_offset = layer_offset + 1
+        if next_offset >= len(self.history_store.layer_ids):
+            return
+        next_layer_id = self.history_store.layer_ids[next_offset]
+        chunks = list(
+            self.history_store.iter_layer_chunks(
+                item.rid, next_layer_id, history_end=item.history_len
+            )
+        )
+        if not chunks:
+            return
+        chunk_groups = _group_adjacent_chunks(chunks, self.config.chunks_per_transfer)
+        transfers = {}
+        for index in range(min(self.staging.num_buffers, len(chunk_groups))):
+            transfers[index] = self.staging.submit_many(
+                [chunk.tensor for chunk in chunk_groups[index]], index
+            )
+        self._single_layer_prefetch[(meta.round_id, item.rid, next_layer_id)] = (
+            transfers
+        )
+
+    def discard_layer_prefetch(self, rid: str | None = None) -> None:
+        if rid is None:
+            self._single_layer_prefetch.clear()
+            return
+        stale_keys = [key for key in self._single_layer_prefetch if key[1] == rid]
+        for key in stale_keys:
+            del self._single_layer_prefetch[key]
 
     def _restore_history(self, item, query, state, meta, layer):
         chunks = list(
@@ -382,7 +455,6 @@ class SpecStreamVerifier:
             max_cohort_delay_us=self.config.max_cohort_delay_us,
         )
 
-        transfer_index = 0
         for plan in plans:
             cohort_queries = torch.stack([queries[work.rid] for work in plan.items])
             max_plan_groups = max(len(groups_by_rid[work.rid]) for work in plan.items)
@@ -392,9 +464,7 @@ class SpecStreamVerifier:
                     [states[work.rid] for work in plan.items]
                 )
 
-            for group_index in range(max_plan_groups):
-                slot = transfer_index % self.staging.num_buffers
-                transfer_index += 1
+            def submit_group(group_index: int, slot: int):
                 source_groups = []
                 for work in plan.items:
                     request_groups = groups_by_rid[work.rid]
@@ -404,7 +474,17 @@ class SpecStreamVerifier:
                         else ()
                     )
                     source_groups.append([chunk.tensor for chunk in chunk_group])
-                transfer = self.staging.submit_cohort_groups(source_groups, slot)
+                return self.staging.submit_cohort_groups(source_groups, slot)
+
+            # Queue one transfer per bounded slot before launching attention.
+            # Later iterations refill the slot consumed num_buffers groups ago,
+            # exactly like the single-request B3 pipeline.
+            transfers = {}
+            for group_index in range(min(self.staging.num_buffers, max_plan_groups)):
+                transfers[group_index] = submit_group(group_index, group_index)
+
+            for group_index in range(max_plan_groups):
+                transfer = transfers.pop(group_index)
                 packed = self.staging.wait_ready(transfer)
                 started = time.perf_counter()
                 if self.config.reference_attention:
@@ -442,6 +522,9 @@ class SpecStreamVerifier:
                 )
                 self.profiler.record_attention(meta.round_id, elapsed)
                 self.staging.mark_consumed(transfer)
+                next_index = group_index + self.staging.num_buffers
+                if next_index < max_plan_groups:
+                    transfers[next_index] = submit_group(next_index, transfer.slot)
 
             if batched_state is not None:
                 for work, new_state in zip(
@@ -471,6 +554,7 @@ class SpecStreamTargetRuntime:
         self.tp_rank = int(tp_rank)
         self.tp_size = int(tp_size)
         self.states: dict[str, TargetTieredKVState] = {}
+        self._pending_seals: dict[str, _PendingSeal] = {}
         self._round_id = 0
 
         kv_pool = self.token_to_kv_pool
@@ -524,11 +608,14 @@ class SpecStreamTargetRuntime:
         if config.enabled and not config.reference_attention:
             logger.info(
                 "SpecStream B3 tiled path: chunk_tokens=%d, "
-                "chunks_per_transfer=%d, buffers=%d, reserved_staging_bytes=%d, "
+                "chunks_per_transfer=%d, buffers=%d, layer_prefetch=%s, "
+                "async_d2h_seal=%s, reserved_staging_bytes=%d, "
                 "reserved_host_pack_bytes=%d",
                 config.chunk_tokens,
                 config.chunks_per_transfer,
                 config.num_buffers,
+                config.layer_prefetch,
+                self.history_store.d2h_stream is not None,
                 self.staging.allocated_bytes,
                 self.staging.allocated_host_bytes,
             )
@@ -551,12 +638,14 @@ class SpecStreamTargetRuntime:
         )
 
     def batch_requires_streaming(self, batch) -> bool:
+        self._poll_pending_seals()
         return any(
             self.states.get(req.rid) is not None and self.states[req.rid].stream_enabled
             for req in batch.reqs
         )
 
     def build_round_meta(self, batch, spec_info, mode: str) -> SpecStreamRoundMeta:
+        self._poll_pending_seals()
         self._round_id += 1
         q_len = int(spec_info.draft_token_num)
         items = []
@@ -621,6 +710,7 @@ class SpecStreamTargetRuntime:
             self.diagnostics.record_logit_margin(round_id=meta.round_id, logits=logits)
 
     def after_verify(self, batch, result, meta) -> None:
+        self._poll_pending_seals()
         accepted = list(result.accept_length_per_req_cpu)
         self.acceptance_tracker.update(meta.q_len, accepted)
         for index, req in enumerate(batch.reqs):
@@ -631,6 +721,7 @@ class SpecStreamTargetRuntime:
             if self.config.strict_invariants:
                 state.check(self.config.chunk_tokens)
             self._publish_req_state(req, state, meta.mode, meta.q_len)
+        self._poll_pending_seals()
         self.profiler.finish_round(
             meta.round_id,
             accepted_tokens=sum(int(value) + 1 for value in accepted),
@@ -639,6 +730,7 @@ class SpecStreamTargetRuntime:
         )
 
     def after_normal_decode(self, batch, result) -> None:
+        self._poll_pending_seals()
         for index, req in enumerate(batch.reqs):
             committed_len = int(batch.seq_lens_cpu[index].item())
             state = self.states.setdefault(
@@ -653,6 +745,7 @@ class SpecStreamTargetRuntime:
             state.logical_len = committed_len
             self._maybe_seal(req, state)
             self._publish_req_state(req, state, "ordinary", 1)
+        self._poll_pending_seals()
 
     def after_extend(self, batch) -> None:
         """Publish prefill state without sealing during prefix-cache bookkeeping.
@@ -661,6 +754,7 @@ class SpecStreamTargetRuntime:
         History remains authoritative, so discard the newly materialized GPU
         copy of the already sealed prefix after the forward has completed.
         """
+        self._poll_pending_seals()
         for index, req in enumerate(batch.reqs):
             committed_len = int(batch.seq_lens_cpu[index].item())
             state = self.states.get(req.rid)
@@ -689,7 +783,11 @@ class SpecStreamTargetRuntime:
             self._publish_req_state(req, state, "parallel", 1)
 
     def _maybe_seal(self, req, state: TargetTieredKVState) -> None:
-        if not self.config.enabled or state.seal_inflight:
+        if (
+            not self.config.enabled
+            or state.seal_inflight
+            or req.rid in self._pending_seals
+        ):
             return
         eligible_end = max(0, state.committed_len - self.config.active_tail_tokens)
         seal_end = (eligible_end // self.config.chunk_tokens) * self.config.chunk_tokens
@@ -708,19 +806,75 @@ class SpecStreamTargetRuntime:
                 slots=slots,
                 token_to_kv_pool=self.token_to_kv_pool,
             )
-            # Lifecycle ordering is deliberate: D2H completion -> allocator
-            # free -> page-table tombstone -> history_len publication.
-            ticket.wait_safe_to_free()
-            self.token_to_kv_pool_allocator.free(slots)
-            self.req_to_token_pool.req_to_token[
-                req.req_pool_idx, state.history_len : seal_end
-            ] = 0
-            state.mark_sealed(seal_end, ticket.block_ids)
+            # Do not wait here.  Until the completion event is observed, this
+            # prefix remains GPU-resident and history_len is intentionally not
+            # published, so ordinary Target attention can keep using it.
+            self._pending_seals[req.rid] = _PendingSeal(
+                rid=req.rid,
+                req_pool_idx=int(req.req_pool_idx),
+                history_start=state.history_len,
+                seal_end=seal_end,
+                slots=slots,
+                ticket=ticket,
+            )
+            logger.debug(
+                "[SpecStream][D2H] queued rid=%s range=[%d,%d) pending=%d",
+                req.rid,
+                state.history_len,
+                seal_end,
+                len(self._pending_seals),
+            )
         except Exception:
             state.seal_inflight = False
             raise
 
+    def _poll_pending_seals(
+        self, *, wait: bool = False, only_rid: str | None = None
+    ) -> int:
+        """Publish completed seals and free GPU slots in lifecycle order.
+
+        Normal decode/verify calls use the nonblocking form.  ``wait=True`` is
+        reserved for terminal request/cache cleanup, where SGLang is about to
+        release the same KV slots through its generic allocator path.
+        """
+
+        completed = 0
+        pending_items = list(self._pending_seals.items())
+        for rid, pending in pending_items:
+            if only_rid is not None and rid != only_rid:
+                continue
+            if not self.history_store.complete_seal(pending.ticket, wait=wait):
+                continue
+            state = self.states.get(rid)
+            if state is None:
+                raise AssertionError("completed seal has no Target tiered state")
+
+            # Lifecycle ordering: D2H completion -> allocator free -> page-table
+            # tombstone -> history_len publication.  All page-table operations
+            # are issued on the current Target stream before the next forward.
+            self.token_to_kv_pool_allocator.free(pending.slots)
+            self.req_to_token_pool.req_to_token[
+                pending.req_pool_idx, pending.history_start : pending.seal_end
+            ] = 0
+            state.mark_sealed(pending.seal_end, pending.ticket.block_ids)
+            del self._pending_seals[rid]
+            completed += 1
+            logger.debug(
+                "[SpecStream][D2H] completed rid=%s history_len=%d pending=%d",
+                rid,
+                state.history_len,
+                len(self._pending_seals),
+            )
+        return completed
+
+    def prepare_request_release(self, rid: str) -> None:
+        """Drain a terminal request before SGLang's generic KV release path."""
+
+        if rid in self._pending_seals:
+            self._poll_pending_seals(wait=True, only_rid=rid)
+
     def collect_batch_state(self, batch) -> SpecStreamBatchState:
+        self._poll_pending_seals()
         histories = [
             self.states.get(req.rid, TargetTieredKVState(req.rid)).history_len
             for req in batch.reqs
@@ -780,10 +934,18 @@ class SpecStreamTargetRuntime:
             )
 
     def release_request(self, rid: str) -> None:
+        # The scheduler normally calls prepare_request_release() before its
+        # generic KV release.  Keep this drain as a defensive fallback for
+        # direct runtime users and tests.
+        self.prepare_request_release(rid)
+        self.verifier.discard_layer_prefetch(rid)
         self.states.pop(rid, None)
         self.history_store.release(rid)
 
     def clear(self) -> None:
+        self._poll_pending_seals(wait=True)
+        self._pending_seals.clear()
+        self.verifier.discard_layer_prefetch()
         self.states.clear()
         self.history_store.clear()
 
@@ -796,3 +958,4 @@ class SpecStreamTargetRuntime:
         req.specstream_round_id = state.round_id
         req.specstream_mode = mode
         req.specstream_q = q
+        req.specstream_seal_inflight = state.seal_inflight

@@ -40,6 +40,7 @@ class StagingWindowPool:
             torch.cuda.Event() if self.copy_stream is not None else None
             for _ in range(self.num_buffers)
         ]
+        self._has_ready_event = [False] * self.num_buffers
         self._free_events = [
             torch.cuda.Event() if self.copy_stream is not None else None
             for _ in range(self.num_buffers)
@@ -49,8 +50,11 @@ class StagingWindowPool:
     def _wait_host_slot_writable(self, slot: int) -> None:
         """Do not overwrite a pinned pack buffer while its H2D is in flight."""
 
-        if self.copy_stream is not None and self._has_free_event[slot]:
-            self._free_events[slot].synchronize()
+        if self.copy_stream is not None and self._has_ready_event[slot]:
+            # The host pack buffer becomes writable as soon as H2D has consumed
+            # it.  Waiting for the later compute/free event unnecessarily
+            # serialized CPU packing with attention execution.
+            self._ready_events[slot].synchronize()
 
     def _ensure_host_shape(
         self,
@@ -151,6 +155,7 @@ class StagingWindowPool:
                     self.copy_stream.wait_event(self._free_events[slot])
                 destination.copy_(source, non_blocking=bool(source.is_pinned()))
                 self._ready_events[slot].record(self.copy_stream)
+                self._has_ready_event[slot] = True
         return StagingTransfer(slot, destination, source.nbytes, submitted_ns)
 
     def submit_many(
@@ -205,6 +210,7 @@ class StagingWindowPool:
                     self.copy_stream.wait_event(self._free_events[slot])
                 copy_sources()
                 self._ready_events[slot].record(self.copy_stream)
+                self._has_ready_event[slot] = True
         return StagingTransfer(
             slot,
             destination,
@@ -286,6 +292,7 @@ class StagingWindowPool:
                     non_blocking=bool(valid_host.is_pinned()),
                 )
                 self._ready_events[slot].record(self.copy_stream)
+                self._has_ready_event[slot] = True
         return StagingTransfer(
             slot=slot,
             tensor=destination,

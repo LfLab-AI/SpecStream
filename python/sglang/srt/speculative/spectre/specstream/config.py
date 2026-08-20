@@ -34,6 +34,7 @@ class SpecStreamConfig:
     chunk_tokens: int = 2048
     num_buffers: int = 2
     chunks_per_transfer: int = 4
+    layer_prefetch: bool = True
     active_tail_tokens: int = 512
     min_history_tokens: int = 8192
     cpu_memory_gb: int = 128
@@ -92,6 +93,7 @@ class SpecStreamConfig:
             chunk_tokens=int(server_args.specstream_chunk_tokens),
             num_buffers=int(server_args.specstream_num_buffers),
             chunks_per_transfer=int(server_args.specstream_chunks_per_transfer),
+            layer_prefetch=bool(server_args.specstream_layer_prefetch),
             active_tail_tokens=int(server_args.specstream_active_tail_tokens),
             min_history_tokens=int(server_args.specstream_min_history_tokens),
             cpu_memory_gb=int(server_args.specstream_cpu_memory_gb),

@@ -251,17 +251,15 @@ class SchedulerSpectreTargetMixin:
                         self._configure_q1_fallback(batch, reason)
                     else:
                         self.send_batch_draft_requests(batch, draft_num_tokens)
-                        batch.draft_num_tokens = (
-                            self._decide_verify_num_draft_tokens(batch)
+                        batch.draft_num_tokens = self._decide_verify_num_draft_tokens(
+                            batch
                         )
                         batch.recv_draft_fn = self.recv_drafts_for_batch
                         batch.retry_fn = self.retry_drafts_for_reqs
                         batch.retry_fail_ratio = (
                             self.server_args.spectre_retry_fail_ratio
                         )
-                        batch.retry_min_count = (
-                            self.server_args.spectre_retry_min_count
-                        )
+                        batch.retry_min_count = self.server_args.spectre_retry_min_count
 
                 result = self.run_batch(batch)
                 self.process_batch_result(batch, result)
@@ -484,12 +482,9 @@ class SchedulerSpectreTargetMixin:
                         timeout_s * 1000,
                         missing,
                     )
-                if (
-                    requested_q > 1
-                    and should_fail_fast_on_draft_timeout(
-                        require_draft=self.server_args.spectre_require_draft,
-                        timeout_action=self.server_args.spectre_draft_timeout_action,
-                    )
+                if requested_q > 1 and should_fail_fast_on_draft_timeout(
+                    require_draft=self.server_args.spectre_require_draft,
+                    timeout_action=self.server_args.spectre_draft_timeout_action,
                 ):
                     fail_fast_message = (
                         "SPECTRE required a remote draft for q="
@@ -651,8 +646,7 @@ class SchedulerSpectreTargetMixin:
             return False
         if wait_for_identity_s > 0.0 and self.tp_rank == 0:
             logger.info(
-                "[Target][DraftLink] registered=%s; sending %d initial "
-                "request(s)",
+                "[Target][DraftLink] registered=%s; sending %d initial " "request(s)",
                 all_drafts_identity[0],
                 len(reqs),
             )
@@ -692,6 +686,18 @@ class SchedulerSpectreTargetMixin:
         runtime = self._get_specstream_runtime()
         if runtime is not None:
             runtime.release_request(req.rid)
+
+    def prepare_specstream_request_release(self, req: Req) -> None:
+        """Finish an in-flight D2H seal before generic KV cache release.
+
+        This is a terminal safety boundary, not part of the decode critical
+        path.  During normal inference seals are retired only through
+        nonblocking CUDA-event polling.
+        """
+
+        runtime = self._get_specstream_runtime()
+        if runtime is not None:
+            runtime.prepare_request_release(req.rid)
 
     def _is_self_high_overhead_target(self, batch: ScheduleBatch) -> bool:
         current_bsz = max(batch.batch_size(), self.running_batch.batch_size())

@@ -543,6 +543,7 @@ class ServerArgs:
     specstream_chunk_tokens: int = 2048
     specstream_num_buffers: int = 2
     specstream_chunks_per_transfer: int = 4
+    specstream_layer_prefetch: bool = True
     specstream_active_tail_tokens: int = 512
     specstream_min_history_tokens: int = 8192
     specstream_cpu_memory_gb: int = 128
@@ -5241,6 +5242,15 @@ class ServerArgs:
             help=(
                 "Number of adjacent CPU History chunks grouped behind one "
                 "staging-ready event and one fused attention launch."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-layer-prefetch",
+            action=argparse.BooleanOptionalAction,
+            default=ServerArgs.specstream_layer_prefetch,
+            help=(
+                "Prefetch the next transformer layer's CPU History into bounded "
+                "GPU staging while the current layer runs tail attention and MLP."
             ),
         )
         parser.add_argument(

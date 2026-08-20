@@ -192,6 +192,11 @@ class SchedulerOutputProcessorMixin:
                     req.check_finished()
                     if req.finished():
                         self.maybe_collect_routed_experts(req)
+                        prepare_specstream_release = getattr(
+                            self, "prepare_specstream_request_release", None
+                        )
+                        if prepare_specstream_release is not None:
+                            prepare_specstream_release(req)
                         release_kv_cache(req, self.tree_cache)
                         req.time_stats.set_completion_time()
                         if (
@@ -578,6 +583,11 @@ class SchedulerOutputProcessorMixin:
             else:
                 if self.enable_hisparse:
                     self.hisparse_coordinator.request_finished(req)
+                prepare_specstream_release = getattr(
+                    self, "prepare_specstream_request_release", None
+                )
+                if prepare_specstream_release is not None:
+                    prepare_specstream_release(req)
                 release_kv_cache(req, self.tree_cache)
 
             req.time_stats.set_completion_time()
