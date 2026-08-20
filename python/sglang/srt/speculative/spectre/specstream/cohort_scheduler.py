@@ -44,13 +44,19 @@ class CohortPlan:
 
 def compatibility_key(item: StreamWorkItem) -> CohortKey:
     descriptor = item.cpu_descriptor
+    descriptors = (
+        tuple(descriptor) if isinstance(descriptor, (list, tuple)) else (descriptor,)
+    )
+    if not descriptors:
+        raise ValueError("cohort CPU descriptor cannot be empty")
+    first_tensor = descriptors[0].tensor
     return CohortKey(
         layer_id=item.layer_id,
         q_bucket=item.q_len,
-        dtype=str(descriptor.tensor.dtype),
-        head_dim=int(descriptor.tensor.shape[-1]),
-        local_kv_heads=int(descriptor.tensor.shape[-2]),
-        chunk_tokens=int(descriptor.tensor.shape[0]),
+        dtype=str(first_tensor.dtype),
+        head_dim=int(first_tensor.shape[-1]),
+        local_kv_heads=int(first_tensor.shape[-2]),
+        chunk_tokens=sum(int(value.tensor.shape[0]) for value in descriptors),
     )
 
 

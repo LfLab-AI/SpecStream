@@ -39,6 +39,9 @@ def summarize(path: Path) -> dict[str, object]:
     round_ms = [number(row, "round_ms") for row in rows]
     network_wait_ms = [number(row, "network_wait_ms") for row in rows]
     cohort_sizes = [number(row, "cohort_size") for row in rows]
+    accepted_tokens = sum(number(row, "accepted_tokens") for row in rows)
+    h2d_ops = sum(number(row, "h2d_ops") for row in rows)
+    stream_attn_ops = sum(number(row, "stream_attn_ops") for row in rows)
     fallback_reasons = Counter(
         row.get("fallback_reason", "")
         for row in rows
@@ -50,11 +53,18 @@ def summarize(path: Path) -> dict[str, object]:
         "stream_rows": sum(number(row, "h2d_bytes") > 0 for row in rows),
         "q_dist": ",".join(f"{key}:{qs[key]}" for key in sorted(qs, key=int)),
         "mode_dist": ",".join(f"{key}:{value}" for key, value in sorted(modes.items())),
-        "max_history": int(max((number(row, "history_len") for row in rows), default=0)),
+        "max_history": int(
+            max((number(row, "history_len") for row in rows), default=0)
+        ),
         "h2d_gib": h2d_bytes / (1024**3),
-        "h2d_ops": int(sum(number(row, "h2d_ops") for row in rows)),
+        "h2d_ops": int(h2d_ops),
+        "h2d_ops_per_accepted": h2d_ops / accepted_tokens if accepted_tokens else 0.0,
         "effective_h2d_gbps": h2d_bytes / h2d_ms / 1e6 if h2d_ms else 0.0,
         "stream_attn_s": sum(number(row, "stream_attn_ms") for row in rows) / 1000,
+        "stream_attn_ops": int(stream_attn_ops),
+        "stream_attn_ops_per_accepted": (
+            stream_attn_ops / accepted_tokens if accepted_tokens else 0.0
+        ),
         "target_forward_s": sum(number(row, "target_forward_ms") for row in rows)
         / 1000,
         "mean_round_ms": sum(round_ms) / len(round_ms) if round_ms else 0.0,
@@ -63,17 +73,13 @@ def summarize(path: Path) -> dict[str, object]:
             sum(network_wait_ms) / len(network_wait_ms) if network_wait_ms else 0.0
         ),
         "p95_network_wait_ms": percentile(network_wait_ms, 0.95),
-        "accepted_tokens": int(sum(number(row, "accepted_tokens") for row in rows)),
-        "mean_cohort": sum(cohort_sizes) / len(cohort_sizes)
-        if cohort_sizes
-        else 0.0,
+        "accepted_tokens": int(accepted_tokens),
+        "mean_cohort": sum(cohort_sizes) / len(cohort_sizes) if cohort_sizes else 0.0,
         "max_cohort": int(max(cohort_sizes, default=0)),
         "fallback_rows": sum(
             str(row.get("fallback", "")).lower() in ("true", "1") for row in rows
         ),
-        "missing_drafts": int(
-            sum(number(row, "missing_draft_count") for row in rows)
-        ),
+        "missing_drafts": int(sum(number(row, "missing_draft_count") for row in rows)),
         "fallback_reasons": ",".join(
             f"{key}:{value}" for key, value in sorted(fallback_reasons.items())
         ),
@@ -98,8 +104,11 @@ def main() -> int:
         "max_history",
         "h2d_gib",
         "h2d_ops",
+        "h2d_ops_per_accepted",
         "effective_h2d_gbps",
         "stream_attn_s",
+        "stream_attn_ops",
+        "stream_attn_ops_per_accepted",
         "target_forward_s",
         "mean_round_ms",
         "p95_round_ms",

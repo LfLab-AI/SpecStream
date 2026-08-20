@@ -31,6 +31,7 @@ class SpecStreamProfileRow:
     h2d_ms: float = 0.0
     h2d_gbps: float = 0.0
     stream_attn_ms: float = 0.0
+    stream_attn_ops: int = 0
     tail_attn_ms: float = 0.0
     target_forward_ms: float = 0.0
     draft_ms: float = 0.0
@@ -126,6 +127,7 @@ class SpecStreamProfiler:
             row.tail_attn_ms += float(elapsed_ms)
         else:
             row.stream_attn_ms += float(elapsed_ms)
+            row.stream_attn_ops += 1
             per_query_ms = float(elapsed_ms) / max(row.q, 1)
             self._attn_q1_ema = 0.8 * self._attn_q1_ema + 0.2 * per_query_ms
 

@@ -39,8 +39,10 @@ from sglang.srt.speculative.spectre.specstream.staging_runtime import (
 )
 from sglang.srt.speculative.spectre.specstream.state import TargetTieredKVState
 from sglang.srt.speculative.spectre.specstream.triton_stream_attn import (
+    split_packed_history_cohort_state,
+    stack_packed_history_cohort_states,
     update_gpu_tail_state,
-    update_packed_history_cohort,
+    update_packed_history_cohort_batched,
     update_packed_history_state,
 )
 
@@ -337,82 +339,101 @@ class SpecStreamVerifier:
             )
             for item in items
         }
-        max_chunks = max((len(chunks) for chunks in chunks_by_rid.values()), default=0)
+        for item in items:
+            if (
+                sum(chunk.length for chunk in chunks_by_rid[item.rid])
+                != item.history_len
+            ):
+                raise AssertionError("CPU History length does not match tiered state")
+
+        group_size = (
+            1 if self.config.reference_attention else self.config.chunks_per_transfer
+        )
+        groups_by_rid = {
+            rid: _group_adjacent_chunks(chunks, group_size)
+            for rid, chunks in chunks_by_rid.items()
+        }
         deadline_ns = time.time_ns() + int(self.config.max_cohort_delay_us * 1000)
-        for chunk_index in range(max_chunks):
-            work_items = []
-            for item in items:
-                chunks = chunks_by_rid[item.rid]
-                if chunk_index >= len(chunks):
-                    continue
-                chunk = chunks[chunk_index]
-                work_items.append(
-                    StreamWorkItem(
-                        rid=item.rid,
-                        round_id=meta.round_id,
-                        layer_id=layer.layer_id,
-                        q_len=meta.q_len,
-                        chunk_idx=chunk_index,
-                        token_begin=chunk.abs_start,
-                        token_end=chunk.abs_start + chunk.length,
-                        bytes=chunk.tensor.nbytes,
-                        deadline_ns=deadline_ns,
-                        cpu_descriptor=chunk,
-                    )
+        request_by_rid = {item.rid: item for item in items}
+        work_items = []
+        for item in items:
+            groups = groups_by_rid[item.rid]
+            if not groups:
+                continue
+            first_group = tuple(groups[0])
+            work_items.append(
+                StreamWorkItem(
+                    rid=item.rid,
+                    round_id=meta.round_id,
+                    layer_id=layer.layer_id,
+                    q_len=meta.q_len,
+                    chunk_idx=0,
+                    token_begin=first_group[0].abs_start,
+                    token_end=first_group[-1].abs_start + first_group[-1].length,
+                    bytes=sum(chunk.tensor.nbytes for chunk in first_group),
+                    deadline_ns=deadline_ns,
+                    cpu_descriptor=first_group,
                 )
-            plans = build_cohort_plans(
-                work_items,
-                max_cohort_size=self.config.max_cohort_size,
-                num_staging_slots=self.staging.num_buffers,
-                max_cohort_delay_us=self.config.max_cohort_delay_us,
             )
-            for plan in plans:
-                sources = [work.cpu_descriptor.tensor for work in plan.items]
-                max_tokens = max(int(source.shape[0]) for source in sources)
-                host = _empty_host(
-                    (len(sources), max_tokens, *sources[0].shape[1:]),
-                    dtype=sources[0].dtype,
-                    pin_memory=torch.cuda.is_available(),
+        plans = build_cohort_plans(
+            work_items,
+            max_cohort_size=self.config.max_cohort_size,
+            num_staging_slots=self.staging.num_buffers,
+            max_cohort_delay_us=self.config.max_cohort_delay_us,
+        )
+
+        transfer_index = 0
+        for plan in plans:
+            cohort_queries = torch.stack([queries[work.rid] for work in plan.items])
+            max_plan_groups = max(len(groups_by_rid[work.rid]) for work in plan.items)
+            batched_state = None
+            if not self.config.reference_attention:
+                batched_state = stack_packed_history_cohort_states(
+                    [states[work.rid] for work in plan.items]
                 )
-                host.zero_()
-                valid = []
-                for index, source in enumerate(sources):
-                    host[index, : source.shape[0]].copy_(source)
-                    valid.append(int(source.shape[0]))
-                transfer = self.staging.submit(host, plan.staging_slot)
+
+            for group_index in range(max_plan_groups):
+                slot = transfer_index % self.staging.num_buffers
+                transfer_index += 1
+                source_groups = []
+                for work in plan.items:
+                    request_groups = groups_by_rid[work.rid]
+                    chunk_group = (
+                        request_groups[group_index]
+                        if group_index < len(request_groups)
+                        else ()
+                    )
+                    source_groups.append([chunk.tensor for chunk in chunk_group])
+                transfer = self.staging.submit_cohort_groups(source_groups, slot)
                 packed = self.staging.wait_ready(transfer)
-                cohort_queries = torch.stack([queries[work.rid] for work in plan.items])
-                cohort_states = [states[work.rid] for work in plan.items]
                 started = time.perf_counter()
                 if self.config.reference_attention:
-                    updated = []
-                    for index, (work, old_state) in enumerate(
-                        zip(plan.items, cohort_states)
-                    ):
-                        updated.append(
-                            self._update_history_state(
-                                old_state,
-                                queries[work.rid],
-                                packed[index, : valid[index]],
-                                meta=meta,
-                                item=next(
-                                    item for item in items if item.rid == work.rid
-                                ),
-                                layer=layer,
-                            )
+                    for index, work in enumerate(plan.items):
+                        valid = transfer.valid_lengths[index]
+                        if valid == 0:
+                            continue
+                        states[work.rid] = self._update_history_state(
+                            states[work.rid],
+                            queries[work.rid],
+                            packed[index, :valid],
+                            meta=meta,
+                            item=request_by_rid[work.rid],
+                            layer=layer,
                         )
                 else:
-                    updated, _ = update_packed_history_cohort(
-                        cohort_states,
+                    if transfer.valid_tokens is None:
+                        raise AssertionError("cohort transfer is missing valid lengths")
+                    if batched_state is None:
+                        raise AssertionError("cohort state was not initialized")
+                    batched_state, _ = update_packed_history_cohort_batched(
+                        batched_state,
                         cohort_queries,
                         packed,
-                        torch.tensor(valid, dtype=torch.int32, device=packed.device),
+                        transfer.valid_tokens,
                         scale=layer.scaling,
                         require_fused_cuda=True,
                     )
                 elapsed = (time.perf_counter() - started) * 1000
-                for work, new_state in zip(plan.items, updated):
-                    states[work.rid] = new_state
                 self.profiler.record_h2d(
                     meta.round_id,
                     transfer.nbytes,
@@ -421,6 +442,12 @@ class SpecStreamVerifier:
                 )
                 self.profiler.record_attention(meta.round_id, elapsed)
                 self.staging.mark_consumed(transfer)
+
+            if batched_state is not None:
+                for work, new_state in zip(
+                    plan.items, split_packed_history_cohort_state(batched_state)
+                ):
+                    states[work.rid] = new_state
 
 
 class SpecStreamTargetRuntime:
@@ -475,23 +502,35 @@ class SpecStreamTargetRuntime:
             reserve_chunks = (
                 1 if config.reference_attention else config.chunks_per_transfer
             )
-            self.staging.reserve(
+            reserve_shape = (
                 (
+                    config.max_cohort_size,
                     config.chunk_tokens * reserve_chunks,
                     2,
                     int(kv_pool.head_num),
                     int(kv_pool.head_dim),
-                ),
-                kv_pool.dtype,
+                )
+                if config.cohort_enabled
+                else (
+                    config.chunk_tokens * reserve_chunks,
+                    2,
+                    int(kv_pool.head_num),
+                    int(kv_pool.head_dim),
+                )
             )
+            self.staging.reserve(reserve_shape, kv_pool.dtype)
+            if config.cohort_enabled:
+                self.staging.reserve_cohort_pack(reserve_shape, kv_pool.dtype)
         if config.enabled and not config.reference_attention:
             logger.info(
                 "SpecStream B3 tiled path: chunk_tokens=%d, "
-                "chunks_per_transfer=%d, buffers=%d, reserved_staging_bytes=%d",
+                "chunks_per_transfer=%d, buffers=%d, reserved_staging_bytes=%d, "
+                "reserved_host_pack_bytes=%d",
                 config.chunk_tokens,
                 config.chunks_per_transfer,
                 config.num_buffers,
                 self.staging.allocated_bytes,
+                self.staging.allocated_host_bytes,
             )
         self.profiler = SpecStreamProfiler(config.profile_path, tp_rank, tp_size)
         self.diagnostics = SpecStreamDiagnostics(
