@@ -42,6 +42,9 @@ from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.speculative.spectre.specstream.config import (
+    should_initialize_drafter_smctrl,
+)
 from sglang.srt.utils import MultiprocessingSerializer, broadcast_pyobj, set_random_seed
 from sglang.srt.utils.hf_transformers_utils import (
     get_processor,
@@ -284,6 +287,16 @@ class TpModelWorker(BaseTpWorker):
                     revision=server_args.revision,
                 )
         self.device = self.model_runner.device
+        self.specstream_draft_stream = None
+        self.specstream_smctrl = None
+        self._last_specstream_draft_tpc_range = None
+        # A remote SPECTRE Drafter is a normal TpModelWorker whose role is
+        # selected by --spectre-role draft.  ``is_draft_worker`` instead marks
+        # an in-process EAGLE/MTP draft model and is false for this server.
+        # Using that flag here skipped libsmctrl initialization until the first
+        # grant attempted to apply a mask.
+        if should_initialize_drafter_smctrl(server_args):
+            self._init_specstream_draft_smctrl()
 
         # Init nccl groups
         self.pp_group = get_pp_group()
@@ -429,6 +442,56 @@ class TpModelWorker(BaseTpWorker):
     def is_dllm(self):
         return self.dllm_algorithm is not None
 
+    def _init_specstream_draft_smctrl(self) -> None:
+        from sglang.srt.speculative.spectre.specstream.sm_controller import (
+            SMController,
+        )
+
+        with torch.cuda.device(self.device):
+            self.specstream_draft_stream = torch.cuda.Stream(
+                device=self.device, priority=0
+            )
+            self.specstream_smctrl = SMController(
+                getattr(self.server_args, "specstream_smctrl_library", "") or None,
+                device_index=self.gpu_id,
+                mask_scope=getattr(
+                    self.server_args, "specstream_smctrl_mask_scope", "stream"
+                ),
+            )
+            logger.info(
+                "SpecStream Draft TPC control initialized: scope=%s total_tpcs=%d",
+                self.specstream_smctrl.mask_scope,
+                self.specstream_smctrl.total_tpcs,
+            )
+
+    def set_specstream_draft_tpc_mask(self, tpc_low: int, tpc_high: int) -> None:
+        if self.specstream_smctrl is None or self.specstream_draft_stream is None:
+            raise RuntimeError(
+                "SpecStream Draft TPC mask requested but libsmctrl is not initialized"
+            )
+        requested = (int(tpc_low), int(tpc_high))
+        if requested == self._last_specstream_draft_tpc_range:
+            return
+        self.specstream_smctrl.set_stream_mask(self.specstream_draft_stream, *requested)
+        self._last_specstream_draft_tpc_range = requested
+
+    def get_specstream_draft_smctrl_info(self) -> tuple[str, int]:
+        if self.specstream_smctrl is None or self.specstream_draft_stream is None:
+            raise RuntimeError(
+                "SpecStream SM control is enabled on the remote Drafter, but "
+                "libsmctrl was not initialized during worker startup"
+            )
+        return (
+            str(self.specstream_smctrl.mask_scope),
+            int(self.specstream_smctrl.total_tpcs),
+        )
+
+    def synchronize_specstream_draft_stream(self) -> None:
+        """Close a grant only after all forward and sampling work completes."""
+        if self.specstream_draft_stream is None:
+            raise RuntimeError("SpecStream Draft stream is not initialized")
+        self.specstream_draft_stream.synchronize()
+
     def _forward_batch_generation_dllm(
         self, forward_batch: ForwardBatch
     ) -> GenerationBatchResult:
@@ -442,6 +505,58 @@ class TpModelWorker(BaseTpWorker):
         )
 
     def forward_batch_generation(
+        self,
+        model_worker_batch: ModelWorkerBatch,
+        forward_batch: Optional[ForwardBatch] = None,
+        pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        is_verify: bool = False,
+        skip_attn_backend_init=False,
+    ) -> GenerationBatchResult:
+        if self.specstream_draft_stream is None:
+            return self._forward_batch_generation_impl(
+                model_worker_batch,
+                forward_batch=forward_batch,
+                pp_proxy_tensors=pp_proxy_tensors,
+                is_verify=is_verify,
+                skip_attn_backend_init=skip_attn_backend_init,
+            )
+        if self._last_specstream_draft_tpc_range is None:
+            raise RuntimeError(
+                "SpecStream refused an ungranted Draft forward: no TPC mask is active"
+            )
+
+        caller_stream = torch.cuda.current_stream(self.device)
+        self.specstream_draft_stream.wait_stream(caller_stream)
+        with torch.cuda.stream(self.specstream_draft_stream):
+            result = self._forward_batch_generation_impl(
+                model_worker_batch,
+                forward_batch=forward_batch,
+                pp_proxy_tensors=pp_proxy_tensors,
+                is_verify=is_verify,
+                skip_attn_backend_init=skip_attn_backend_init,
+            )
+            done = torch.cuda.Event()
+            done.record(self.specstream_draft_stream)
+        caller_stream.wait_event(done)
+
+        delayed = result.delay_sample_func
+        if delayed is not None:
+            draft_stream = self.specstream_draft_stream
+
+            def sample_on_draft_stream():
+                current = torch.cuda.current_stream(self.device)
+                draft_stream.wait_stream(current)
+                with torch.cuda.stream(draft_stream):
+                    sampled = delayed()
+                    sample_done = torch.cuda.Event()
+                    sample_done.record(draft_stream)
+                current.wait_event(sample_done)
+                return sampled
+
+            result.delay_sample_func = sample_on_draft_stream
+        return result
+
+    def _forward_batch_generation_impl(
         self,
         model_worker_batch: ModelWorkerBatch,
         forward_batch: Optional[ForwardBatch] = None,

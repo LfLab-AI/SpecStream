@@ -17,6 +17,10 @@ from sglang.srt.speculative.spectre.drafter.spectre_state_manager import (
     SpectreDraftState,
     SpectreDraftStateManager,
 )
+from sglang.srt.speculative.spectre.specstream.gpu_grant import (
+    DraftExecutionGrant,
+    DraftGrantTable,
+)
 from sglang.srt.speculative.spectre.spectre_protocol import (
     SpectreAction,
     SpectreRequest,
@@ -65,6 +69,37 @@ class SpectreDraftSchedulerMixin:
         self.last_draft_batch: Optional[ScheduleBatch] = None
         self._draft_batch_pending_adds: List[Req] = []
         self.draft_forward_cycle: int = 0
+        self._specstream_grants_enabled = bool(
+            getattr(self.server_args, "specstream_smctrl_enabled", False)
+        )
+        if (
+            self._specstream_grants_enabled
+            and not self.server_args.spectre_draft_priority
+        ):
+            raise RuntimeError(
+                "SpecStream SM control requires --spectre-draft-priority so "
+                "one-token grant boundaries cannot be bypassed"
+            )
+        if self._specstream_grants_enabled and self.enable_overlap:
+            raise RuntimeError(
+                "SpecStream SM control requires --disable-overlap-schedule so "
+                "a grant closes only after synchronous Draft sampling"
+            )
+        if self._specstream_grants_enabled:
+            worker = getattr(self, "tp_worker", getattr(self, "model_worker", None))
+            readiness = getattr(worker, "get_specstream_draft_smctrl_info", None)
+            if readiness is None:
+                raise RuntimeError(
+                    "SpecStream remote Drafter worker does not expose libsmctrl "
+                    "startup readiness"
+                )
+            mask_scope, total_tpcs = readiness()
+            logger.info(
+                "SpecStream remote Drafter libsmctrl ready: scope=%s total_tpcs=%d",
+                mask_scope,
+                total_tpcs,
+            )
+        self._grant_table = DraftGrantTable()
         self.draft_cleanup_interval: int = int(
             os.environ.get("SGLANG_DRAFT_CLEANUP_INTERVAL", "500")
         )
@@ -119,6 +154,10 @@ class SpectreDraftSchedulerMixin:
                 self._cleanup_stale_draft_states()
 
     def _run_draft_priority_phase(self) -> None:
+        if self._specstream_grants_enabled:
+            self._run_granted_draft_step()
+            return
+
         saved_last_batch = self.last_batch
         self._filter_draft_batch()
 
@@ -152,6 +191,188 @@ class SpectreDraftSchedulerMixin:
             self._update_draft_batch_after_decode()
 
         self.last_batch = saved_last_batch
+
+    def _run_granted_draft_step(self) -> None:
+        """Run at most one token and only for requests with an active grant."""
+        saved_last_batch = self.last_batch
+        self._pause_ungranted_draft_reqs()
+        self._filter_draft_batch()
+        if self.draft_batch.is_empty():
+            self.last_batch = saved_last_batch
+            return
+
+        grants = self._active_grants_for_batch(self.draft_batch)
+        if len(grants) != len(self.draft_batch.reqs):
+            # Fail closed if request/grant state changed between filtering and
+            # launch preparation.
+            self._pause_ungranted_draft_reqs()
+            self._filter_draft_batch()
+            self.last_batch = saved_last_batch
+            return
+        if not self.draft_batch.check_decode_mem():
+            self._handle_draft_batch_oom()
+            self.last_batch = saved_last_batch
+            return
+
+        self._apply_batch_grant_mask(grants.values())
+        runnable_reqs = list(self.draft_batch.reqs)
+        started = time.perf_counter()
+        self.draft_batch.prepare_for_decode()
+        result = self.run_batch(self.draft_batch)
+        self._synchronize_specstream_draft_stream()
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+        for req in runnable_reqs:
+            grant = grants.get(req.rid)
+            if grant is None:
+                continue
+            consumed = self._grant_table.consume_one(
+                req.rid,
+                spec_cnt=int(req.spec_cnt),
+                grant_epoch=grant.grant_epoch,
+            )
+            if not consumed:
+                raise RuntimeError(
+                    f"Draft grant changed during forward for request {req.rid}"
+                )
+            self._send_grant_ack(req, grant, elapsed_ms)
+
+        # ACK is emitted after GPU completion but before a terminal DRAFT
+        # response.  This preserves the protocol invariant that the next grant
+        # cannot overtake completion of the previous quantum.
+        self._process_draft_decode_result(self.draft_batch, result)
+        for req in runnable_reqs:
+            if not req.finished():
+                req.draft_is_paused = True
+                state = self._get_draft_state(req.rid)
+                if state is not None:
+                    state.location = DraftReqLocation.PAUSED
+                    state.last_updated_time = time.time()
+                if req not in self.draft_paused_reqs:
+                    self.draft_paused_reqs.append(req)
+
+        self._update_draft_batch_after_decode()
+        self.last_batch = saved_last_batch
+
+    def _active_grants_for_batch(
+        self, batch: ScheduleBatch
+    ) -> Dict[str, DraftExecutionGrant]:
+        return self._grant_table.active_for(
+            ((req.rid, int(req.spec_cnt)) for req in batch.reqs)
+        )
+
+    def _pause_ungranted_draft_reqs(self) -> None:
+        if self.draft_batch.is_empty():
+            return
+        for req in self.draft_batch.reqs:
+            if (
+                self._grant_table.active(req.rid, spec_cnt=int(req.spec_cnt))
+                is not None
+            ):
+                continue
+            self._ack_expired_grant(req)
+            req.draft_is_paused = True
+            state = self._get_draft_state(req.rid)
+            if state is not None:
+                state.location = DraftReqLocation.PAUSED
+                state.last_updated_time = time.time()
+            if req not in self.draft_paused_reqs:
+                self.draft_paused_reqs.append(req)
+
+    def _ack_expired_grant(self, req: Req) -> bool:
+        expired = self._grant_table.pop_expired(
+            req.rid, spec_cnt=int(req.spec_cnt)
+        )
+        if expired is None:
+            return False
+        # A deadline can expire while the message is in ZMQ or while Target
+        # owns the GPU.  Failing closed is correct, but silently deleting the
+        # grant strands Target's outstanding epoch and prevents it from issuing
+        # DRAFT_CATCHUP.  A zero-token ACK reports that no CUDA work launched
+        # and safely reopens the one-token sequencer.
+        self._send_grant_ack(
+            req,
+            expired,
+            0.0,
+            grant_tokens=0,
+            grant_state="EXPIRED",
+        )
+        if self.tp_rank == 0:
+            logger.debug(
+                "[Draft][Grant] expired rid=%s spec_cnt=%s epoch=%s; "
+                "sent zero-token ACK",
+                req.rid,
+                req.spec_cnt,
+                expired.grant_epoch,
+            )
+        return True
+
+    def _apply_batch_grant_mask(self, grants) -> tuple[int, int]:
+        grants = tuple(grants)
+        if not grants:
+            raise RuntimeError("cannot launch Draft CUDA work without a grant")
+        low = max(grant.tpc_low for grant in grants)
+        high = min(grant.tpc_high for grant in grants)
+        if high <= low:
+            raise RuntimeError("active Draft grants have disjoint TPC ranges")
+        worker = getattr(self, "tp_worker", getattr(self, "model_worker", None))
+        setter = getattr(worker, "set_specstream_draft_tpc_mask", None)
+        if setter is None:
+            raise RuntimeError(
+                "SpecStream Drafter worker does not expose stream-level TPC masking"
+            )
+        setter(low, high)
+        return low, high
+
+    def _synchronize_specstream_draft_stream(self) -> None:
+        worker = getattr(self, "tp_worker", getattr(self, "model_worker", None))
+        synchronize = getattr(worker, "synchronize_specstream_draft_stream", None)
+        if synchronize is None:
+            raise RuntimeError(
+                "SpecStream Drafter worker does not expose stream synchronization"
+            )
+        synchronize()
+
+    def _send_grant_ack(
+        self,
+        req: Req,
+        grant: DraftExecutionGrant,
+        elapsed_ms: float,
+        *,
+        grant_tokens: int = 1,
+        grant_state: Optional[str] = None,
+    ) -> None:
+        if self.tp_size > 1 and self.tp_rank != 0:
+            return
+        if not hasattr(self, "zmq_communicator") or self.zmq_communicator is None:
+            return
+        self.zmq_communicator.send_objs(
+            [
+                SpectreRequest(
+                    request_id=req.rid,
+                    spec_cnt=int(req.spec_cnt),
+                    action=SpectreAction.GRANT_ACK,
+                    spec_type=SpecType.DRAFT_RESPONSE,
+                    grant_epoch=grant.grant_epoch,
+                    grant_tokens=int(grant_tokens),
+                    tpc_low=grant.tpc_low,
+                    tpc_high=grant.tpc_high,
+                    draft_step_ms=float(elapsed_ms),
+                    grant_state=grant_state or grant.grant_state,
+                )
+            ]
+        )
+        if self.tp_rank == 0:
+            logger.debug(
+                "[Draft][Grant] ACK rid=%s spec_cnt=%s epoch=%s tokens=%s "
+                "state=%s step_ms=%.3f",
+                req.rid,
+                req.spec_cnt,
+                grant.grant_epoch,
+                grant_tokens,
+                grant_state or grant.grant_state,
+                elapsed_ms,
+            )
 
     def _process_draft_decode_result(self, batch: ScheduleBatch, result) -> None:
         self.process_batch_result_decode(batch, result)
@@ -229,11 +450,41 @@ class SpectreDraftSchedulerMixin:
         if not self.draft_waiting_queue:
             return
 
-        for req in self.draft_waiting_queue:
+        candidate_reqs = list(self.draft_waiting_queue)
+        if self._specstream_grants_enabled:
+            granted_reqs = []
+            for req in candidate_reqs:
+                grant = self._grant_table.active(req.rid, spec_cnt=int(req.spec_cnt))
+                if grant is None:
+                    self._ack_expired_grant(req)
+                    continue
+                if grant.grant_state != "DRAFT_CATCHUP":
+                    # The offline SLACK_FILL table is calibrated for one-token
+                    # decode.  A re-prefill may be arbitrarily longer, so it is
+                    # deferred until Target explicitly enters its wait phase.
+                    if self._grant_table.consume_one(
+                        req.rid,
+                        spec_cnt=int(req.spec_cnt),
+                        grant_epoch=grant.grant_epoch,
+                    ):
+                        self._send_grant_ack(
+                            req,
+                            grant,
+                            0.0,
+                            grant_tokens=0,
+                            grant_state="PREFILL_DEFERRED",
+                        )
+                    continue
+                granted_reqs.append(req)
+            candidate_reqs = granted_reqs
+            if not candidate_reqs:
+                return
+
+        for req in candidate_reqs:
             req.init_next_round_input(self.tree_cache)
 
         adder = self._build_prefill_adder_for_draft()
-        for req in self.draft_waiting_queue:
+        for req in candidate_reqs:
             res = adder.add_one_req(
                 req,
                 has_chunked_req=False,
@@ -243,6 +494,15 @@ class SpectreDraftSchedulerMixin:
                 break
 
         admitted: List[Req] = adder.can_run_list
+        grants = None
+        if self._specstream_grants_enabled:
+            grants = self._grant_table.active_for(
+                ((req.rid, int(req.spec_cnt)) for req in admitted)
+            )
+            if len(grants) != len(admitted):
+                # Leave every request in draft_waiting_queue.  In particular,
+                # do not allocate a prefill batch after a deadline expires.
+                return
         admitted_set = set(id(r) for r in admitted)
         self.draft_waiting_queue = [
             r for r in self.draft_waiting_queue if id(r) not in admitted_set
@@ -260,8 +520,39 @@ class SpectreDraftSchedulerMixin:
             self.spec_algorithm,
         )
         draft_prefill_batch.prepare_for_extend()
+        if self._specstream_grants_enabled:
+            assert grants is not None
+            self._apply_batch_grant_mask(grants.values())
+        started = time.perf_counter()
         result = self.run_batch(draft_prefill_batch)
+        if self._specstream_grants_enabled:
+            self._synchronize_specstream_draft_stream()
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            for req in admitted:
+                grant = grants.get(req.rid)
+                if grant is None:
+                    continue
+                if not self._grant_table.consume_one(
+                    req.rid,
+                    spec_cnt=int(req.spec_cnt),
+                    grant_epoch=grant.grant_epoch,
+                ):
+                    raise RuntimeError(
+                        f"Draft grant changed during prefill for request {req.rid}"
+                    )
+                self._send_grant_ack(req, grant, elapsed_ms)
+
         self._process_draft_prefill_result(draft_prefill_batch, result)
+        if self._specstream_grants_enabled:
+            for req in admitted:
+                if not req.finished():
+                    req.draft_is_paused = True
+                    state = self._get_draft_state(req.rid)
+                    if state is not None:
+                        state.location = DraftReqLocation.PAUSED
+                        state.last_updated_time = time.time()
+                    if req not in self.draft_paused_reqs:
+                        self.draft_paused_reqs.append(req)
 
         draft_prefill_batch.filter_batch()
 
@@ -274,7 +565,11 @@ class SpectreDraftSchedulerMixin:
             for req in draft_prefill_batch.reqs:
                 state = self._get_draft_state(req.rid)
                 if state:
-                    state.location = DraftReqLocation.DRAFT_BATCH
+                    state.location = (
+                        DraftReqLocation.PAUSED
+                        if getattr(req, "draft_is_paused", False)
+                        else DraftReqLocation.DRAFT_BATCH
+                    )
 
     def _process_draft_prefill_result(self, batch: ScheduleBatch, result) -> None:
         self.process_batch_result_prefill(batch, result)
@@ -438,7 +733,12 @@ class SpectreDraftSchedulerMixin:
             req_id = draft_req.request_id
             action = getattr(draft_req, "action", SpectreAction.DRAFT)
 
-            if action in (SpectreAction.FINISH, SpectreAction.ABORT):
+            if action in (
+                SpectreAction.FINISH,
+                SpectreAction.ABORT,
+                SpectreAction.GRANT,
+                SpectreAction.PAUSE,
+            ):
                 control_msgs.append(draft_req)
                 continue
 
@@ -468,7 +768,68 @@ class SpectreDraftSchedulerMixin:
                     logger.debug(
                         f"[Draft] Received {action} for {draft_req.request_id}"
                     )
+                self._grant_table.release(draft_req.request_id)
                 self._finish_draft_request(draft_req.request_id)
+            elif action == SpectreAction.GRANT:
+                if not self._specstream_grants_enabled:
+                    continue
+                try:
+                    grant = DraftExecutionGrant(
+                        request_id=str(draft_req.request_id),
+                        spec_cnt=int(draft_req.spec_cnt or 0),
+                        grant_epoch=int(draft_req.grant_epoch or 0),
+                        grant_tokens=int(draft_req.grant_tokens or 0),
+                        tpc_low=int(draft_req.tpc_low or 0),
+                        tpc_high=int(draft_req.tpc_high or 0),
+                        deadline_us=(
+                            int(draft_req.deadline_us)
+                            if draft_req.deadline_us is not None
+                            else None
+                        ),
+                        placement_id=int(draft_req.placement_id or 0),
+                        grant_state=str(draft_req.grant_state or ""),
+                    )
+                except (TypeError, ValueError) as exc:
+                    if self.tp_rank == 0:
+                        logger.warning("[Draft][Grant] invalid grant ignored: %s", exc)
+                    continue
+                applied = self._grant_table.apply(grant)
+                if not applied.accepted:
+                    if self.tp_rank == 0:
+                        logger.debug(
+                            "[Draft][Grant] ignored %s grant rid=%s epoch=%s",
+                            applied.reason,
+                            grant.request_id,
+                            grant.grant_epoch,
+                        )
+                    continue
+                state = self._get_draft_state(grant.request_id)
+                if (
+                    state is not None
+                    and state.req_object is not None
+                    and state.location == DraftReqLocation.PAUSED
+                    and int(state.req_object.spec_cnt) == grant.spec_cnt
+                ):
+                    self._resume_draft_req(state.req_object, state)
+            elif action == SpectreAction.PAUSE:
+                if not self._specstream_grants_enabled:
+                    continue
+                self._grant_table.pause(
+                    str(draft_req.request_id),
+                    spec_cnt=(
+                        int(draft_req.spec_cnt)
+                        if draft_req.spec_cnt is not None
+                        else None
+                    ),
+                    grant_epoch=(
+                        int(draft_req.grant_epoch)
+                        if draft_req.grant_epoch is not None
+                        else None
+                    ),
+                )
+                state = self._get_draft_state(str(draft_req.request_id))
+                if state is not None and state.req_object is not None:
+                    self._pause_req(state.req_object, state)
 
     def _process_draft_requests(self, latest_msgs: Dict[str, SpectreRequest]) -> None:
         for req_id, draft_req in latest_msgs.items():
@@ -899,6 +1260,9 @@ class SpectreDraftSchedulerMixin:
         if req in self.draft_waiting_queue:
             self.draft_waiting_queue.remove(req)
 
+        if req in self._draft_batch_pending_adds:
+            self._draft_batch_pending_adds.remove(req)
+
     def _prepare_for_reprefill(
         self,
         req: Req,
@@ -1085,6 +1449,8 @@ class SpectreDraftSchedulerMixin:
             )
 
     def _finish_draft_request(self, req_id: str) -> None:
+        if hasattr(self, "_grant_table"):
+            self._grant_table.release(req_id)
         state = self._get_draft_state(req_id)
         if state is None:
             return

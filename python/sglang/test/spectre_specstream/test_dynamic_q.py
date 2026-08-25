@@ -82,7 +82,7 @@ def test_draft_timeout_forces_short_ar_backoff():
     )
 
 
-def test_near_timeout_draft_pressure_caps_horizon():
+def test_legacy_step2_policy_does_not_change_q_or_execution_permission():
     ctl = IOAwareController(
         (1, 2, 4, 8),
         switch_threshold=0,
@@ -100,9 +100,9 @@ def test_near_timeout_draft_pressure_caps_horizon():
         SpecStreamCostProfile(),
         AcceptanceTracker().snapshot((1, 2, 4, 8)),
     )
-    assert decision.q <= 2
-    assert decision.reason == "draft_pressure_limited"
-    assert decision.coexec_mode == "THROTTLE"
+    assert decision.q in (1, 2, 4, 8)
+    assert decision.reason != "draft_pressure_limited"
+    assert decision.coexec_mode == "COEXEC"
 
 
 def test_tp_straggler_serializes_before_it_becomes_severe():
@@ -161,7 +161,7 @@ def test_severe_tp_straggler_forces_q1_fallback():
     assert decision.reason == "tp_straggler_fallback"
 
 
-def test_compute_heavy_target_phase_throttles_colocated_draft_work():
+def test_compute_ratio_is_not_used_as_gpu_execution_permission():
     ctl = IOAwareController(
         (1, 2, 4, 8),
         switch_threshold=0,
@@ -178,9 +178,9 @@ def test_compute_heavy_target_phase_throttles_colocated_draft_work():
         ),
         AcceptanceTracker().snapshot((1, 2, 4, 8)),
     )
-    assert decision.q <= 4
-    assert decision.coexec_mode == "THROTTLE"
-    assert decision.reason == "target_compute_heavy"
+    assert decision.q in (1, 2, 4, 8)
+    assert decision.coexec_mode == "COEXEC"
+    assert decision.reason != "target_compute_heavy"
 
 
 def test_tp_snapshot_is_ignored_when_step3_policy_is_disabled():

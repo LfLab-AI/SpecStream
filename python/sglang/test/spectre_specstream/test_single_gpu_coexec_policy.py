@@ -9,7 +9,7 @@ from sglang.srt.speculative.spectre.specstream.single_gpu_coexec_policy import (
 )
 
 
-def test_single_gpu_policy_limits_q_when_drafter_is_near_timeout():
+def test_legacy_single_gpu_policy_no_longer_converts_pressure_into_gpu_control():
     policy = SingleGPUCoexecPolicy()
     result = policy.constrain(
         max_q=8,
@@ -21,9 +21,9 @@ def test_single_gpu_policy_limits_q_when_drafter_is_near_timeout():
             pressure_p95=0.92,
         ),
     )
-    assert result.max_q == 2
-    assert result.coexec_mode == "THROTTLE"
-    assert result.reason == "draft_pressure_limited"
+    assert result.max_q == 8
+    assert result.coexec_mode == "COEXEC"
+    assert result.reason == "deprecated_mps_policy_disabled"
 
 
 def test_single_gpu_policy_does_not_read_tp_state():
@@ -35,3 +35,4 @@ def test_single_gpu_policy_does_not_read_tp_state():
     )
     assert result.max_q == 8
     assert result.coexec_mode == "COEXEC"
+    assert result.reason == "deprecated_mps_policy_disabled"

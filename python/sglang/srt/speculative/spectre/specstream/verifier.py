@@ -15,6 +15,9 @@ from sglang.srt.speculative.spectre.specstream.cohort_scheduler import (
     build_cohort_plans,
 )
 from sglang.srt.speculative.spectre.specstream.config import SpecStreamConfig
+from sglang.srt.speculative.spectre.specstream.coexec_runtime import (
+    TargetGrantRuntime,
+)
 from sglang.srt.speculative.spectre.specstream.controller import (
     IOAwareController,
     SpecStreamDecision,
@@ -27,6 +30,9 @@ from sglang.srt.speculative.spectre.specstream.cpu_history_store import (
 from sglang.srt.speculative.spectre.specstream.diagnostics import (
     SpecStreamDiagnostics,
 )
+from sglang.srt.speculative.spectre.specstream.gpu_grant_controller import (
+    GpuGrantController,
+)
 from sglang.srt.speculative.spectre.specstream.mps_env import read_mps_environment
 from sglang.srt.speculative.spectre.specstream.multi_gpu_tp_policy import (
     MultiGPUTPPolicy,
@@ -38,13 +44,15 @@ from sglang.srt.speculative.spectre.specstream.online_softmax import (
     update_online_softmax_state,
 )
 from sglang.srt.speculative.spectre.specstream.profiler import SpecStreamProfiler
+from sglang.srt.speculative.spectre.specstream.resource_profile import (
+    ResourceProfile,
+    context_bucket,
+)
 from sglang.srt.speculative.spectre.specstream.round_meta import (
     SpecStreamRequestMeta,
     SpecStreamRoundMeta,
 )
-from sglang.srt.speculative.spectre.specstream.single_gpu_coexec_policy import (
-    SingleGPUCoexecPolicy,
-)
+from sglang.srt.speculative.spectre.specstream.slack_profiler import SlackProfiler
 from sglang.srt.speculative.spectre.specstream.staging_runtime import (
     StagingTransfer,
     StagingWindowPool,
@@ -1076,14 +1084,21 @@ class SpecStreamTargetRuntime:
                 "SpecStream co-execution requires CUDA MPS, but the Target "
                 "process has no visible MPS quota, partition or pipe directory"
             )
-        if config.coexec_enabled:
+        if config.coexec_enabled and not config.smctrl_enabled:
+            logger.warning(
+                "--specstream-coexec-enabled no longer changes q or grants GPU "
+                "execution; enable --specstream-smctrl-enabled with a calibrated "
+                "profile for innovation point 2"
+            )
+        if config.smctrl_enabled:
             logger.info(
-                "SpecStream co-execution deployment: mps=%s active_threads=%s "
-                "priority=%s partition=%s",
+                "SpecStream Target-priority SM control: mps=%s "
+                "active_threads=%s priority=%s partition=%s profile=%s",
                 self.mps_environment.configured,
                 self.mps_environment.active_thread_percentage,
                 self.mps_environment.client_priority,
                 self.mps_environment.sm_partition or "none",
+                config.coexec_resource_profile_path,
             )
         if config.colocated_tp_rank >= self.tp_size:
             raise ValueError("SpecStream colocated TP rank is outside the TP group")
@@ -1171,6 +1186,31 @@ class SpecStreamTargetRuntime:
             config.profile_path, config.shadow_attention
         )
         self.acceptance_tracker = AcceptanceTracker()
+        self.slack_profiler = SlackProfiler()
+        self.grant_runtime = None
+        if config.smctrl_enabled:
+            calibration = config.smctrl_calibration_tpcs > 0
+            resource_profile = (
+                None
+                if calibration
+                else ResourceProfile.load(config.coexec_resource_profile_path)
+            )
+            self.grant_runtime = TargetGrantRuntime(
+                GpuGrantController(
+                    resource_profile,
+                    target_slowdown_budget=(config.coexec_target_slowdown_budget),
+                    guard_us=config.coexec_guard_us,
+                    calibration_tpcs=config.smctrl_calibration_tpcs,
+                    calibration_allow_overlap=(config.smctrl_calibration_allow_overlap),
+                )
+            )
+            if calibration:
+                logger.warning(
+                    "SpecStream calibration mode: fixed Draft TPCs=%d overlap=%s; "
+                    "do not report this as the online controller",
+                    config.smctrl_calibration_tpcs,
+                    config.smctrl_calibration_allow_overlap,
+                )
         controller_candidates = (
             config.q_candidates if config.dynamic_q else (config.default_q,)
         )
@@ -1178,20 +1218,6 @@ class SpecStreamTargetRuntime:
             IOAwareController(
                 controller_candidates,
                 config.q_switch_threshold,
-                single_gpu_policy=(
-                    SingleGPUCoexecPolicy(
-                        draft_pressure_ratio=config.coexec_draft_pressure_ratio,
-                        draft_timeout_rate_threshold=(
-                            config.coexec_timeout_rate_threshold
-                        ),
-                        draft_pending_high_watermark=(
-                            config.coexec_pending_high_watermark
-                        ),
-                        compute_ratio_threshold=(config.coexec_compute_ratio_threshold),
-                    )
-                    if config.coexec_enabled
-                    else None
-                ),
                 multi_gpu_policy=(
                     MultiGPUTPPolicy(
                         rank_skew_budget_ms=config.tp_straggler_budget_ms,
@@ -1201,9 +1227,7 @@ class SpecStreamTargetRuntime:
                     else None
                 ),
             )
-            if (
-                config.dynamic_q or config.coexec_enabled or config.tp_straggler_control
-            )
+            if (config.dynamic_q or config.tp_straggler_control)
             else None
         )
         self.tp_monitor = (
@@ -1296,6 +1320,9 @@ class SpecStreamTargetRuntime:
     def record_target_forward(
         self, meta, elapsed_ms: float, enqueue_ms: float = 0.0
     ) -> None:
+        self.slack_profiler.record_target_phase("target_forward", elapsed_ms)
+        if self.grant_runtime is not None:
+            self.grant_runtime.record_target_forward(elapsed_ms)
         if meta is not None:
             self.profiler.record_target_forward(
                 meta.round_id, elapsed_ms, enqueue_ms=enqueue_ms
@@ -1564,6 +1591,99 @@ class SpecStreamTargetRuntime:
     def record_network_wait(self, elapsed_ms: float) -> None:
         self.profiler.record_network_wait(elapsed_ms)
 
+    def prepare_initial_grants(self, batch, desired_q: int):
+        if self.grant_runtime is None:
+            return []
+        reqs = [
+            req for req in batch.reqs if not str(req.rid).startswith("HEALTH_CHECK")
+        ]
+        return self._register_grant_reqs(reqs, desired_q)
+
+    def prepare_retry_grants(self, reqs, desired_q: int):
+        if self.grant_runtime is None:
+            return []
+        reqs = [req for req in reqs if not str(req.rid).startswith("HEALTH_CHECK")]
+        return self._register_grant_reqs(reqs, desired_q)
+
+    def _register_grant_reqs(self, reqs, desired_q: int):
+        if not reqs:
+            return []
+        batch_size = len(reqs)
+        max_context = max(
+            len(getattr(req, "origin_input_ids", ()) or ())
+            + len(getattr(req, "output_ids", ()) or ())
+            for req in reqs
+        )
+        ctx_bucket = context_bucket(max_context)
+        target_shape = f"verify_bs{batch_size}_q{int(desired_q)}_ctx{ctx_bucket}"
+        predicted_slack_us = self.slack_profiler.snapshot(
+            "target_forward"
+        ).predicted_slack_us
+        keys = []
+        for req in reqs:
+            key = (str(req.rid), int(req.spec_cnt))
+            keys.append(key)
+            self.grant_runtime.register_round(
+                request_id=key[0],
+                spec_cnt=key[1],
+                desired_q=int(desired_q),
+                target_shape=target_shape,
+                draft_bs=batch_size,
+                draft_ctx_bucket=ctx_bucket,
+                predicted_slack_us=predicted_slack_us,
+            )
+        messages = self.grant_runtime.initial_grants(keys)
+        for message in messages:
+            self.profiler.record_grant(message, target_phase="target_forward")
+        if not messages:
+            for key in keys:
+                state = self.grant_runtime.state_for(*key)
+                if state is not None and state.last_decision is not None:
+                    self.profiler.record_grant_decision(
+                        state.last_decision, target_phase="target_forward"
+                    )
+                    break
+        return messages
+
+    def waiting_grants(self, keys, *, deadline_us: int):
+        if self.grant_runtime is None:
+            return []
+        messages = self.grant_runtime.waiting_grants(
+            list(keys), deadline_us=int(deadline_us)
+        )
+        for message in messages:
+            self.profiler.record_grant(message, target_phase="target_wait")
+        if not messages:
+            for key in keys:
+                state = self.grant_runtime.state_for(*key)
+                if state is not None and state.last_decision is not None:
+                    self.profiler.record_grant_decision(
+                        state.last_decision, target_phase="target_wait"
+                    )
+                    break
+        return messages
+
+    def acknowledge_grant(self, message) -> bool:
+        if self.grant_runtime is None:
+            return False
+        accepted = self.grant_runtime.acknowledge(message)
+        if accepted:
+            state = self.grant_runtime.state_for(
+                str(message.request_id), int(message.spec_cnt or 0)
+            )
+            self.profiler.record_grant_ack(
+                message,
+                wait_ms=(state.last_grant_wait_ms if state is not None else 0.0),
+            )
+            if float(getattr(message, "draft_step_ms", 0.0) or 0.0) > 0:
+                self.slack_profiler.record_draft_step(message.draft_step_ms)
+        return accepted
+
+    def pause_grants(self, keys):
+        if self.grant_runtime is None:
+            return []
+        return self.grant_runtime.pause_messages(list(keys))
+
     def record_draft_result(
         self,
         *,
@@ -1599,6 +1719,8 @@ class SpecStreamTargetRuntime:
         self.verifier.discard_layer_prefetch(rid)
         self.states.pop(rid, None)
         self.history_store.release(rid)
+        if self.grant_runtime is not None:
+            self.grant_runtime.release_request(rid)
 
     def clear(self) -> None:
         self._poll_pending_seals(wait=True)

@@ -312,15 +312,49 @@ class SchedulerSpectreTargetMixin:
         pending_rids: Set[str],
         pending_spec_cnts: Dict[str, int],
         timeout_s: float,
+        target_forward_done_event=None,
     ) -> List[SpectreRequest]:
         all_messages: List[SpectreRequest] = []
         deadline = time.perf_counter() + timeout_s
+        grant_deadline_us = time.monotonic_ns() // 1000 + int(timeout_s * 1e6)
+        grant_keys = [
+            (str(rid), int(pending_spec_cnts[rid]))
+            for rid in pending_rids
+            if rid in pending_spec_cnts
+        ]
+        runtime = self._get_specstream_runtime()
+
+        def target_forward_complete() -> bool:
+            if target_forward_done_event is None:
+                return True
+            try:
+                return bool(target_forward_done_event.query())
+            except RuntimeError:
+                return False
+
+        def pump_waiting_grants() -> None:
+            if runtime is None or not pending_rids or not target_forward_complete():
+                return
+            keys = [key for key in grant_keys if key[0] in pending_rids]
+            grant_messages = runtime.waiting_grants(keys, deadline_us=grant_deadline_us)
+            if grant_messages:
+                self._zmq_send(grant_messages)
+
+        # DRAFT_CATCHUP is issued only after the asynchronous Target CUDA
+        # forward has completed.  Before that point, only an offline-approved
+        # SLACK_FILL grant sent at round start may execute.
+        pump_waiting_grants()
 
         while pending_rids:
+            pump_waiting_grants()
             msgs = self._drain_msg_buffer()
             if msgs:
                 all_messages.extend(msgs)
                 for msg in msgs:
+                    if msg.action == SpectreAction.GRANT_ACK:
+                        if runtime is not None:
+                            runtime.acknowledge_grant(msg)
+                        continue
                     if msg.action != SpectreAction.DRAFT:
                         continue
                     if msg.request_id not in pending_rids:
@@ -330,6 +364,7 @@ class SchedulerSpectreTargetMixin:
                         pending_rids.discard(msg.request_id)
                 if not pending_rids:
                     break
+                pump_waiting_grants()
 
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
@@ -339,7 +374,10 @@ class SchedulerSpectreTargetMixin:
                         f"{list(pending_rids)} \033[0m"
                     )
                 break
-            self._data_ready.wait(timeout=remaining)
+            wait_timeout = (
+                remaining if target_forward_complete() else min(remaining, 0.001)
+            )
+            self._data_ready.wait(timeout=wait_timeout)
 
         return all_messages
 
@@ -451,6 +489,9 @@ class SchedulerSpectreTargetMixin:
                         and self.req_to_draft_token[req.rid][req.spec_cnt] is None
                     },
                     timeout_s=timeout_s,
+                    target_forward_done_event=getattr(
+                        batch, "spectre_target_forward_done_event", None
+                    ),
                 )
                 if pending_rids
                 else []
@@ -495,6 +536,14 @@ class SchedulerSpectreTargetMixin:
                 batch.spectre_draft_timeout = True
                 batch.spectre_missing_draft_rids = missing
                 batch.spectre_fallback_reason = "remote_draft_timeout"
+                if self.tp_size == 1 or self.tp_rank == 0:
+                    runtime = self._get_specstream_runtime()
+                    if runtime is not None:
+                        pause_messages = runtime.pause_grants(
+                            [(str(req.rid), int(req.spec_cnt)) for req in missing_reqs]
+                        )
+                        if pause_messages:
+                            self._zmq_send(pause_messages)
                 for req in missing_reqs:
                     # Ordinary mode consumes this marker in the current worker
                     # call. Parallel/extend mode consumes it on the next batch.
@@ -630,8 +679,16 @@ class SchedulerSpectreTargetMixin:
                         )
                     )
                 if draft_reqs:
+                    runtime = self._get_specstream_runtime()
+                    grant_reqs = (
+                        runtime.prepare_initial_grants(
+                            batch, speculative_num_draft_tokens
+                        )
+                        if runtime is not None
+                        else []
+                    )
                     batch.spectre_draft_request_sent = self._zmq_send(
-                        draft_reqs,
+                        draft_reqs + grant_reqs,
                         wait_for_identity_s=(
                             self._initial_recv_timeout_s
                             if any(req.spec_cnt <= 0 for req in reqs_to_send)
@@ -660,7 +717,13 @@ class SchedulerSpectreTargetMixin:
             if not _is_health_check(req)
         ]
         if reqs_to_send:
-            self._zmq_send(reqs_to_send)
+            runtime = self._get_specstream_runtime()
+            grant_reqs = (
+                runtime.prepare_retry_grants(failed_reqs, num_draft_tokens)
+                if runtime is not None
+                else []
+            )
+            self._zmq_send(reqs_to_send + grant_reqs)
 
     def _zmq_send(
         self, reqs: List[SpectreRequest], wait_for_identity_s: float = 0.0

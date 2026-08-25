@@ -24,10 +24,11 @@ class SingleGPUConstraint:
 
 
 class SingleGPUCoexecPolicy:
-    """Step 2 policy: protect Target while Draft shares the same physical GPU.
+    """Compatibility wrapper for the retired MPS-centric Step-2 policy.
 
-    This module deliberately knows nothing about TP ranks or multi-GPU
-    collectives.  It only looks at Drafter pressure and the local Target phase.
+    Kept so old launch configurations and imports do not fail.  It must not
+    convert Target compute ratio or Draft RTT into GPU execution permission;
+    the measured-profile ``GpuGrantController`` owns that decision now.
     """
 
     def __init__(
@@ -58,44 +59,5 @@ class SingleGPUCoexecPolicy:
         profile: SpecStreamCostProfile,
         draft_load: DraftLoadSnapshot,
     ) -> SingleGPUConstraint:
-        pressure_p95 = draft_load.pressure_p95
-        pending_p95 = draft_load.pending_p95
-        timeout_rate = draft_load.timeout_rate
-        reject_rate = draft_load.reject_rate
-
-        if (
-            (timeout_rate > 0.0 and timeout_rate >= self.draft_timeout_rate_threshold)
-            or (reject_rate > 0.0 and reject_rate >= self.draft_timeout_rate_threshold)
-            or pressure_p95 >= min(0.95, self.draft_pressure_ratio + 0.10)
-            or (
-                pending_p95 >= self.draft_pending_high_watermark
-                and pressure_p95 >= 0.50
-            )
-        ):
-            return SingleGPUConstraint(2, THROTTLE, "draft_pressure_limited")
-
-        if (
-            timeout_rate > 0.0
-            or pressure_p95 >= self.draft_pressure_ratio
-            or (
-                pending_p95 >= max(2, self.draft_pending_high_watermark // 2)
-                and pressure_p95 >= 0.50
-            )
-        ):
-            return SingleGPUConstraint(
-                max(2, (max_q + 1) // 2),
-                THROTTLE,
-                "draft_pressure_limited",
-            )
-
-        if (
-            profile.target_compute_ratio >= self.compute_ratio_threshold
-            and profile.exposed_copy_ms <= max(0.05, 0.1 * profile.target_other_ms)
-        ):
-            return SingleGPUConstraint(
-                max(2, (max_q + 1) // 2),
-                THROTTLE,
-                "target_compute_heavy",
-            )
-
-        return SingleGPUConstraint(max_q)
+        del profile, draft_load
+        return SingleGPUConstraint(int(max_q), COEXEC, "deprecated_mps_policy_disabled")

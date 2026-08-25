@@ -441,7 +441,11 @@ class SpectreWorker:
         # and also waited for unrelated D2H/H2D streams.
         new_drafts_per_req: dict = {}
         if recv_draft_fn is not None and not batch.forward_mode.is_idle():
-            new_drafts_per_req = recv_draft_fn(batch)
+            batch.spectre_target_forward_done_event = forward_done
+            try:
+                new_drafts_per_req = recv_draft_fn(batch)
+            finally:
+                batch.spectre_target_forward_done_event = None
             if getattr(batch, "spectre_draft_timeout", False):
                 # The receive deadline already established Drafter overload.
                 # A synchronous retry would add another half-timeout to the

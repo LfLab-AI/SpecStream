@@ -16,5 +16,5 @@ if [ ! -f "$ZMQ_HPP_PATH" ]; then
   exit 1
 fi
 
-python3 setup.py build_ext --inplace
+python3 setup.py build_ext --inplace --force
 popd

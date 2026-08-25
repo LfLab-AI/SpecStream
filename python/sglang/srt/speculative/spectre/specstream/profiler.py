@@ -27,6 +27,7 @@ class SpecStreamProfileRow:
     round_id: int
     mode: str
     q: int
+    batch_size: int = 1
     context_tokens: int = 0
     committed_len: int = 0
     history_len: int = 0
@@ -70,6 +71,13 @@ class SpecStreamProfileRow:
     controller_selected_mode: str = ""
     coexec_mode: str = ""
     coexec_reason: str = ""
+    target_phase: str = ""
+    grant_state: str = ""
+    grant_epoch: int = 0
+    grant_wait_ms: float = 0.0
+    draft_step_ms: float = 0.0
+    draft_tpc_low: int = -1
+    draft_tpc_high: int = -1
     mps_active_thread_percentage: int = 0
     mps_client_priority: int = -1
     mps_sm_partition: str = ""
@@ -121,6 +129,7 @@ class SpecStreamProfiler:
         self._pending_decision = None
         self._draft_load = DraftLoadSnapshot()
         self._tp_snapshot = TPStragglerSnapshot()
+        self._pending_grant: dict[str, object] = {}
 
     def begin_round(self, meta, *, chunk_tokens: int = 0) -> None:
         chunk_tokens = int(chunk_tokens)
@@ -134,6 +143,7 @@ class SpecStreamProfiler:
             round_id=meta.round_id,
             mode=meta.mode,
             q=meta.q_len,
+            batch_size=max(len(meta.items), 1),
             context_tokens=meta.context_tokens,
             committed_len=max((item.committed_len for item in meta.items), default=0),
             history_len=max((item.history_len for item in meta.items), default=0),
@@ -155,6 +165,13 @@ class SpecStreamProfiler:
             controller_selected_mode=str(getattr(decision, "mode", "")),
             coexec_mode=str(getattr(decision, "coexec_mode", "")),
             coexec_reason=str(getattr(decision, "reason", "")),
+            target_phase=str(self._pending_grant.get("target_phase", "")),
+            grant_state=str(self._pending_grant.get("grant_state", "")),
+            grant_epoch=int(self._pending_grant.get("grant_epoch", 0) or 0),
+            grant_wait_ms=float(self._pending_grant.get("grant_wait_ms", 0.0) or 0.0),
+            draft_step_ms=float(self._pending_grant.get("draft_step_ms", 0.0) or 0.0),
+            draft_tpc_low=int(self._pending_grant.get("draft_tpc_low", -1) or 0),
+            draft_tpc_high=int(self._pending_grant.get("draft_tpc_high", -1) or 0),
             draft_rtt_ema_ms=self._draft_load.rtt_ema_ms,
             draft_rtt_p95_ms=self._draft_load.rtt_p95_ms,
             pending_drafts=self._draft_load.pending_p95,
@@ -186,7 +203,54 @@ class SpecStreamProfiler:
             h2d_timing_source=self._h2d_timing_source,
         )
         self._pending_decision = None
+        self._pending_grant = {}
         self._pending_network_ms = 0.0
+
+    def record_grant(self, message, *, target_phase: str) -> None:
+        values = {
+            "target_phase": str(target_phase),
+            "grant_state": str(getattr(message, "grant_state", "") or ""),
+            "grant_epoch": int(getattr(message, "grant_epoch", 0) or 0),
+            "draft_tpc_low": int(getattr(message, "tpc_low", -1)),
+            "draft_tpc_high": int(getattr(message, "tpc_high", -1)),
+        }
+        if self._active:
+            row = self._active[max(self._active)]
+            for key, value in values.items():
+                setattr(row, key, value)
+        else:
+            self._pending_grant.update(values)
+
+    def record_grant_decision(self, decision, *, target_phase: str) -> None:
+        values = {
+            "target_phase": str(target_phase),
+            "grant_state": str(getattr(getattr(decision, "state", ""), "value", "")),
+            "draft_tpc_low": int(getattr(decision, "tpc_low", -1)),
+            "draft_tpc_high": int(getattr(decision, "tpc_high", -1)),
+        }
+        if self._active:
+            row = self._active[max(self._active)]
+            for key, value in values.items():
+                setattr(row, key, value)
+        else:
+            self._pending_grant.update(values)
+
+    def record_grant_ack(self, message, *, wait_ms: float = 0.0) -> None:
+        values = {
+            "grant_epoch": int(getattr(message, "grant_epoch", 0) or 0),
+            "grant_wait_ms": max(float(wait_ms), 0.0),
+            "draft_step_ms": max(
+                float(getattr(message, "draft_step_ms", 0.0) or 0.0), 0.0
+            ),
+            "draft_tpc_low": int(getattr(message, "tpc_low", -1)),
+            "draft_tpc_high": int(getattr(message, "tpc_high", -1)),
+        }
+        if self._active:
+            row = self._active[max(self._active)]
+            for key, value in values.items():
+                setattr(row, key, value)
+        else:
+            self._pending_grant.update(values)
 
     def record_h2d(
         self, round_id: int, nbytes: int, elapsed_ms: float, cohort_size: int = 1

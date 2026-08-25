@@ -559,6 +559,15 @@ class ServerArgs:
     specstream_coexec_pending_high_watermark: int = 16
     specstream_coexec_compute_ratio_threshold: float = 0.90
     specstream_coexec_require_mps: bool = False
+    specstream_smctrl_enabled: bool = False
+    specstream_grant_token_quantum: int = 1
+    specstream_coexec_target_slowdown_budget: float = 0.05
+    specstream_coexec_guard_us: float = 200.0
+    specstream_coexec_resource_profile_path: str = "specstream_resource_profile.json"
+    specstream_smctrl_library: str = ""
+    specstream_smctrl_mask_scope: str = "stream"
+    specstream_smctrl_calibration_tpcs: int = 0
+    specstream_smctrl_calibration_allow_overlap: bool = False
     specstream_tp_straggler_control: bool = False
     specstream_colocated_tp_rank: int = 0
     specstream_tp_straggler_budget_ms: float = 1.0
@@ -3127,7 +3136,11 @@ class ServerArgs:
                     "then Drafter, and run the documented explicit smoke test."
                 )
 
-        if self.specstream_enabled or self.specstream_profile_only:
+        if (
+            self.specstream_enabled
+            or self.specstream_profile_only
+            or (self.specstream_smctrl_enabled and self.spectre_role == "target")
+        ):
             from sglang.srt.speculative.spectre.specstream.config import (
                 SpecStreamConfig,
             )
@@ -5395,9 +5408,9 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.specstream_coexec_enabled,
             help=(
-                "Enable resource-aware colocated Draft/Target control. The "
-                "runtime changes q and ordinary/parallel gating; the MPS SM "
-                "quota itself remains a process-start setting."
+                "Deprecated compatibility switch for the former MPS-centric "
+                "q policy. Use --specstream-smctrl-enabled for Target-priority "
+                "one-token grants backed by an offline TPC profile."
             ),
         )
         parser.add_argument(
@@ -5435,8 +5448,85 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.specstream_coexec_require_mps,
             help=(
-                "Refuse colocated co-execution when no CUDA MPS quota or static "
-                "SM partition is visible in the Target process environment."
+                "Compatibility check only: require an MPS environment for the "
+                "two CUDA processes. MPS percentage is not a scheduling input."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-smctrl-enabled",
+            action="store_true",
+            default=ServerArgs.specstream_smctrl_enabled,
+            help=(
+                "Enable Target-priority one-token Draft grants and BulletServe-"
+                "style TPC masking. Requires an offline calibrated "
+                "resource profile and libsmctrl on the Drafter."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-grant-token-quantum",
+            type=int,
+            choices=(1,),
+            default=ServerArgs.specstream_grant_token_quantum,
+            help="Execution-grant quantum. SpecStream v1 requires exactly one token.",
+        )
+        parser.add_argument(
+            "--specstream-coexec-target-slowdown-budget",
+            type=float,
+            default=ServerArgs.specstream_coexec_target_slowdown_budget,
+            help=(
+                "Maximum calibrated Target slowdown allowed for a SLACK_FILL "
+                "profile entry (default: 0.05)."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-coexec-guard-us",
+            type=float,
+            default=ServerArgs.specstream_coexec_guard_us,
+            help="Safety guard subtracted from predicted slack before granting Draft.",
+        )
+        parser.add_argument(
+            "--specstream-coexec-resource-profile-path",
+            type=str,
+            default=ServerArgs.specstream_coexec_resource_profile_path,
+            help="Offline measured JSON table for Target shape/Draft TPC interference.",
+        )
+        parser.add_argument(
+            "--specstream-smctrl-library",
+            type=str,
+            default=ServerArgs.specstream_smctrl_library,
+            help=(
+                "Path to libsmctrl.so. Empty uses SGLANG_SPECSTREAM_SMCTRL_LIBRARY "
+                "or csrc/specstream_smctrl/build/libsmctrl.so."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-smctrl-mask-scope",
+            type=str,
+            choices=("stream", "global"),
+            default=ServerArgs.specstream_smctrl_mask_scope,
+            help=(
+                "TPC mask backend. 'stream' uses the version-specific CUDA "
+                "stream-structure offset. 'global' uses the QMD/TMD launch "
+                "callback for a dedicated Drafter process and supports at most "
+                "64 TPCs. Use global only after validate-global passes."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-smctrl-calibration-tpcs",
+            type=int,
+            default=ServerArgs.specstream_smctrl_calibration_tpcs,
+            help=(
+                "Calibration only: use a fixed Draft TPC count instead of an "
+                "online resource profile. Zero disables calibration mode."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-smctrl-calibration-allow-overlap",
+            action="store_true",
+            default=ServerArgs.specstream_smctrl_calibration_allow_overlap,
+            help=(
+                "Calibration only: issue fixed-TPC grants during Target forward "
+                "to measure interference. Never use for the final online run."
             ),
         )
         parser.add_argument(

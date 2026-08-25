@@ -4,6 +4,16 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
+def should_initialize_drafter_smctrl(server_args) -> bool:
+    """True only for the standalone remote SPECTRE Drafter process."""
+
+    return bool(
+        getattr(server_args, "specstream_smctrl_enabled", False)
+        and getattr(server_args, "speculative_algorithm", None) == "SPECTRE"
+        and getattr(server_args, "spectre_role", None) == "draft"
+    )
+
+
 def parse_q_candidates(value: str | Iterable[int]) -> tuple[int, ...]:
     if isinstance(value, str):
         raw_values = [item.strip() for item in value.split(",") if item.strip()]
@@ -27,6 +37,7 @@ def parse_q_candidates(value: str | Iterable[int]) -> tuple[int, ...]:
 
 @dataclass(frozen=True)
 class SpecStreamConfig:
+    spectre_role: str | None = None
     enabled: bool = False
     profile_only: bool = False
     full_restore_baseline: bool = False
@@ -48,6 +59,15 @@ class SpecStreamConfig:
     coexec_pending_high_watermark: int = 16
     coexec_compute_ratio_threshold: float = 0.90
     coexec_require_mps: bool = False
+    smctrl_enabled: bool = False
+    grant_token_quantum: int = 1
+    coexec_target_slowdown_budget: float = 0.05
+    coexec_guard_us: float = 200.0
+    coexec_resource_profile_path: str = "specstream_resource_profile.json"
+    smctrl_library: str = ""
+    smctrl_mask_scope: str = "stream"
+    smctrl_calibration_tpcs: int = 0
+    smctrl_calibration_allow_overlap: bool = False
     tp_straggler_control: bool = False
     colocated_tp_rank: int = 0
     tp_straggler_budget_ms: float = 1.0
@@ -96,6 +116,30 @@ class SpecStreamConfig:
             raise ValueError(
                 "specstream_coexec_compute_ratio_threshold must be in (0, 1]"
             )
+        if self.grant_token_quantum != 1:
+            raise ValueError("SpecStream v1 grant_token_quantum must equal 1")
+        if not 0.0 <= self.coexec_target_slowdown_budget <= 1.0:
+            raise ValueError(
+                "specstream_coexec_target_slowdown_budget must be in [0, 1]"
+            )
+        if self.coexec_guard_us < 0:
+            raise ValueError("specstream_coexec_guard_us cannot be negative")
+        if self.smctrl_calibration_tpcs < 0:
+            raise ValueError("specstream_smctrl_calibration_tpcs cannot be negative")
+        if self.smctrl_mask_scope not in {"stream", "global"}:
+            raise ValueError("specstream_smctrl_mask_scope must be stream or global")
+        if self.smctrl_calibration_allow_overlap and self.smctrl_calibration_tpcs < 1:
+            raise ValueError(
+                "calibration overlap requires --specstream-smctrl-calibration-tpcs"
+            )
+        if (
+            self.smctrl_enabled
+            and self.smctrl_calibration_tpcs < 1
+            and not self.coexec_resource_profile_path
+        ):
+            raise ValueError(
+                "SpecStream SM control requires a calibrated resource profile path"
+            )
         if self.colocated_tp_rank < 0:
             raise ValueError("specstream_colocated_tp_rank cannot be negative")
         if self.tp_straggler_budget_ms < 0:
@@ -122,6 +166,15 @@ class SpecStreamConfig:
             raise ValueError(
                 "SpecStream co-execution requires --specstream-enabled or "
                 "--specstream-profile-only"
+            )
+        if (
+            self.smctrl_enabled
+            and self.spectre_role != "draft"
+            and not self.control_runtime_enabled
+        ):
+            raise ValueError(
+                "SpecStream SM control requires --specstream-enabled or "
+                "--specstream-profile-only on the Target"
             )
         if self.tp_straggler_control and not self.control_runtime_enabled:
             raise ValueError(
@@ -151,6 +204,7 @@ class SpecStreamConfig:
     @classmethod
     def from_server_args(cls, server_args) -> "SpecStreamConfig":
         return cls(
+            spectre_role=getattr(server_args, "spectre_role", None),
             enabled=bool(server_args.specstream_enabled),
             profile_only=bool(server_args.specstream_profile_only),
             full_restore_baseline=bool(server_args.specstream_full_restore_baseline),
@@ -180,6 +234,21 @@ class SpecStreamConfig:
                 server_args.specstream_coexec_compute_ratio_threshold
             ),
             coexec_require_mps=bool(server_args.specstream_coexec_require_mps),
+            smctrl_enabled=bool(server_args.specstream_smctrl_enabled),
+            grant_token_quantum=int(server_args.specstream_grant_token_quantum),
+            coexec_target_slowdown_budget=float(
+                server_args.specstream_coexec_target_slowdown_budget
+            ),
+            coexec_guard_us=float(server_args.specstream_coexec_guard_us),
+            coexec_resource_profile_path=str(
+                server_args.specstream_coexec_resource_profile_path
+            ),
+            smctrl_library=str(server_args.specstream_smctrl_library),
+            smctrl_mask_scope=str(server_args.specstream_smctrl_mask_scope),
+            smctrl_calibration_tpcs=int(server_args.specstream_smctrl_calibration_tpcs),
+            smctrl_calibration_allow_overlap=bool(
+                server_args.specstream_smctrl_calibration_allow_overlap
+            ),
             tp_straggler_control=bool(server_args.specstream_tp_straggler_control),
             colocated_tp_rank=int(server_args.specstream_colocated_tp_rank),
             tp_straggler_budget_ms=float(server_args.specstream_tp_straggler_budget_ms),

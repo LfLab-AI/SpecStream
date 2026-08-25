@@ -3,7 +3,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from sglang.srt.speculative.spectre.specstream.config import SpecStreamConfig
+from sglang.srt.speculative.spectre.specstream.config import (
+    SpecStreamConfig,
+    should_initialize_drafter_smctrl,
+)
 from sglang.srt.speculative.spectre.specstream.controller import SpecStreamDecision
 from sglang.srt.speculative.spectre.specstream.draft_load_tracker import (
     DraftLoadSnapshot,
@@ -13,6 +16,22 @@ from sglang.srt.speculative.spectre.specstream.profiler import SpecStreamProfile
 from sglang.srt.speculative.spectre.specstream.tp_straggler_monitor import (
     TPStragglerSnapshot,
 )
+
+
+def test_smctrl_initializes_for_remote_spectre_drafter_role():
+    args = SimpleNamespace(
+        specstream_smctrl_enabled=True,
+        speculative_algorithm="SPECTRE",
+        spectre_role="draft",
+    )
+    assert should_initialize_drafter_smctrl(args)
+
+    args.spectre_role = "target"
+    assert not should_initialize_drafter_smctrl(args)
+
+    args.spectre_role = "draft"
+    args.specstream_smctrl_enabled = False
+    assert not should_initialize_drafter_smctrl(args)
 
 
 def test_control_and_tp_metrics_are_written_to_profile(tmp_path):
@@ -120,6 +139,29 @@ def test_native_gpu_kv_mode_cannot_enable_offload_only_features():
 def test_tiered_kv_and_native_gpu_kv_modes_are_mutually_exclusive():
     with pytest.raises(ValueError, match="mutually exclusive"):
         SpecStreamConfig(enabled=True, profile_only=True)
+
+
+def test_target_sm_control_requires_a_target_control_runtime():
+    with pytest.raises(ValueError, match="SM control requires"):
+        SpecStreamConfig(spectre_role="target", smctrl_enabled=True)
+
+    config = SpecStreamConfig(
+        spectre_role="target", profile_only=True, smctrl_enabled=True
+    )
+    assert config.smctrl_enabled
+
+
+def test_drafter_sm_control_does_not_require_target_profile_runtime():
+    config = SpecStreamConfig(spectre_role="draft", smctrl_enabled=True)
+    assert config.smctrl_enabled
+    assert not config.control_runtime_enabled
+
+
+def test_sm_control_rejects_multi_token_and_ambiguous_calibration():
+    with pytest.raises(ValueError, match="must equal 1"):
+        SpecStreamConfig(grant_token_quantum=2)
+    with pytest.raises(ValueError, match="calibration overlap requires"):
+        SpecStreamConfig(smctrl_calibration_allow_overlap=True)
 
 
 def test_profile_schema_change_uses_a_new_file_instead_of_shifting_columns(tmp_path):
