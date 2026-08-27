@@ -24,7 +24,8 @@ constexpr bool kNativeLittleEndian = false;
 constexpr bool kNativeLittleEndian = true;
 #endif
 
-constexpr uint32_t kSpectreRequestFieldCount = 15;
+constexpr uint32_t kSpectreRequestV1FieldCount = 15;
+constexpr uint32_t kSpectreRequestFieldCount = 23;
 
 template <typename T>
 inline void pack_optional_value(msgpack::packer<StringStream> &pk,
@@ -139,6 +140,14 @@ void pack_spectre_request(msgpack::packer<StringStream> &pk,
   pack_optional_float_vector_bin(pk, req.draft_logprobs);
   pk.pack(req.draft_recv_time);
   pk.pack(req.draft_send_time);
+  pack_optional_value(pk, req.grant_epoch);
+  pack_optional_value(pk, req.grant_tokens);
+  pack_optional_value(pk, req.tpc_low);
+  pack_optional_value(pk, req.tpc_high);
+  pack_optional_value(pk, req.deadline_us);
+  pack_optional_value(pk, req.placement_id);
+  pack_optional_value(pk, req.grant_state);
+  pack_optional_value(pk, req.draft_step_ms);
 }
 
 template <typename T>
@@ -230,7 +239,7 @@ void unpack_optional_float_vector_bin(
 void unpack_spectre_request(const msgpack::object &obj,
                             spectre::SpectreRequest &req) {
   if (obj.type != msgpack::type::ARRAY ||
-      obj.via.array.size < kSpectreRequestFieldCount) {
+      obj.via.array.size < kSpectreRequestV1FieldCount) {
     throw std::runtime_error("invalid Spectre request payload");
   }
 
@@ -250,6 +259,16 @@ void unpack_spectre_request(const msgpack::object &obj,
   unpack_optional_float_vector_bin(fields[12], req.draft_logprobs);
   req.draft_recv_time = fields[13].as<double>();
   req.draft_send_time = fields[14].as<double>();
+  if (obj.via.array.size >= kSpectreRequestFieldCount) {
+    unpack_optional_value(fields[15], req.grant_epoch);
+    unpack_optional_value(fields[16], req.grant_tokens);
+    unpack_optional_value(fields[17], req.tpc_low);
+    unpack_optional_value(fields[18], req.tpc_high);
+    unpack_optional_value(fields[19], req.deadline_us);
+    unpack_optional_value(fields[20], req.placement_id);
+    unpack_optional_value(fields[21], req.grant_state);
+    unpack_optional_value(fields[22], req.draft_step_ms);
+  }
 }
 
 } // namespace

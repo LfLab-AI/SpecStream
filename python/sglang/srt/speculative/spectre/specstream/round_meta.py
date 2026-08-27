@@ -35,6 +35,7 @@ class SpecStreamRoundMeta:
     fallback: bool = False
     fallback_reason: str = ""
     missing_draft_count: int = 0
+    coexec_mode: str = "COEXEC"
 
     @property
     def history_tokens(self) -> int:

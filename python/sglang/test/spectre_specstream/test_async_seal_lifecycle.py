@@ -7,6 +7,9 @@ torch = pytest.importorskip("torch")
 from sglang.srt.speculative.spectre.specstream.cpu_history_store import (  # noqa: E402
     SealTicket,
 )
+from sglang.srt.speculative.spectre.specstream.config import (  # noqa: E402
+    SpecStreamConfig,
+)
 from sglang.srt.speculative.spectre.specstream.state import (  # noqa: E402
     TargetTieredKVState,
 )
@@ -99,3 +102,45 @@ def test_terminal_release_is_the_only_blocking_drain():
     assert event.ready
     assert "r" not in runtime._pending_seals
     assert state.history_len == 4
+
+
+def test_after_extend_seals_only_completed_prefills():
+    runtime = SpecStreamTargetRuntime.__new__(SpecStreamTargetRuntime)
+    runtime.states = {}
+    runtime._pending_seals = {}
+    runtime._poll_pending_seals = lambda **kwargs: 0
+    sealed = []
+    runtime._maybe_seal = lambda req, state: sealed.append(
+        (req.rid, state.committed_len)
+    )
+
+    complete = SimpleNamespace(rid="complete", is_chunked=0)
+    partial = SimpleNamespace(rid="partial", is_chunked=1)
+    batch = SimpleNamespace(
+        reqs=[complete, partial], seq_lens_cpu=torch.tensor([16384, 4096])
+    )
+
+    runtime.after_extend(batch)
+
+    assert sealed == [("complete", 16384)]
+    assert runtime.states["complete"].committed_len == 16384
+    assert runtime.states["partial"].committed_len == 4096
+
+
+def test_profile_only_control_runtime_never_seals_native_gpu_kv():
+    runtime = SpecStreamTargetRuntime.__new__(SpecStreamTargetRuntime)
+    runtime.config = SpecStreamConfig(profile_only=True, coexec_enabled=True)
+    runtime._pending_seals = {}
+    state = TargetTieredKVState("native", committed_len=16384, logical_len=16384)
+
+    class _MustNotOffload:
+        @staticmethod
+        def seal_slots_async(**_kwargs):
+            raise AssertionError("profile-only mode attempted to offload Target KV")
+
+    runtime.history_store = _MustNotOffload()
+    runtime._maybe_seal(SimpleNamespace(rid="native"), state)
+
+    assert state.history_len == 0
+    assert not state.stream_enabled
+    assert not state.seal_inflight

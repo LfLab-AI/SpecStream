@@ -527,6 +527,8 @@ class ServerArgs:
     spectre_retry_min_count: int = 1
     spectre_recv_timeout_ms: int = 2000
     spectre_initial_recv_timeout_ms: int = 10000
+    spectre_failure_threshold: int = 3
+    spectre_cooldown_rounds: int = 32
     spectre_fixed_q_mode: Literal["ordinary", "parallel"] = "parallel"
     spectre_require_draft: bool = False
     spectre_draft_timeout_action: Literal["fallback", "error"] = "fallback"
@@ -547,9 +549,30 @@ class ServerArgs:
     specstream_active_tail_tokens: int = 512
     specstream_min_history_tokens: int = 8192
     specstream_cpu_memory_gb: int = 128
+    specstream_gpu_reserve_mb: int = 1024
     specstream_dynamic_q: bool = False
     specstream_q_candidates: str = "1,2,4,6,8"
     specstream_q_switch_threshold: float = 0.08
+    specstream_coexec_enabled: bool = False
+    specstream_coexec_draft_pressure_ratio: float = 0.80
+    specstream_coexec_timeout_rate_threshold: float = 0.10
+    specstream_coexec_pending_high_watermark: int = 16
+    specstream_coexec_compute_ratio_threshold: float = 0.90
+    specstream_coexec_require_mps: bool = False
+    specstream_smctrl_enabled: bool = False
+    specstream_grant_token_quantum: int = 1
+    specstream_coexec_target_slowdown_budget: float = 0.05
+    specstream_coexec_guard_us: float = 200.0
+    specstream_coexec_resource_profile_path: str = "specstream_resource_profile.json"
+    specstream_smctrl_library: str = ""
+    specstream_smctrl_mask_scope: str = "stream"
+    specstream_smctrl_calibration_tpcs: int = 0
+    specstream_smctrl_calibration_allow_overlap: bool = False
+    specstream_tp_straggler_control: bool = False
+    specstream_colocated_tp_rank: int = 0
+    specstream_tp_straggler_budget_ms: float = 1.0
+    specstream_target_slowdown_budget: float = 0.10
+    specstream_tp_monitor_interval: int = 8
     specstream_cohort_enabled: bool = False
     specstream_max_cohort_size: int = 8
     specstream_max_cohort_delay_us: float = 200.0
@@ -1375,6 +1398,31 @@ class ServerArgs:
             model_config = self.get_model_config()
             if model_config.is_multimodal and not self.language_only:
                 self.adjust_mem_fraction_for_vlm(model_config)
+
+        # SpecStream is initialized after SGLang has sized and allocated the
+        # fixed GPU KV pool.  Its bounded H2D staging windows and the temporary
+        # gather/pack buffer used by asynchronous D2H sealing therefore need
+        # explicit headroom outside that pool.  Without this reservation the
+        # pool can consume essentially all HBM and the first seal fails even
+        # though it is intended to offload KV to CPU.
+        if (
+            self.specstream_enabled
+            and gpu_mem is not None
+            and self.specstream_gpu_reserve_mb > 0
+        ):
+            original_fraction = self.mem_fraction_static
+            self.mem_fraction_static = max(
+                0.05,
+                self.mem_fraction_static
+                - float(self.specstream_gpu_reserve_mb) / float(gpu_mem),
+            )
+            logger.info(
+                "SpecStream reserves %d MiB outside the fixed GPU KV pool: "
+                "mem_fraction_static %.3f -> %.3f",
+                self.specstream_gpu_reserve_mb,
+                original_fraction,
+                self.mem_fraction_static,
+            )
 
         # If symm mem is enabled and prealloc size is not set, set it to 4GB
         if self.enable_symm_mem and not envs.SGLANG_SYMM_MEM_PREALLOC_GB_SIZE.is_set():
@@ -3057,15 +3105,15 @@ class ServerArgs:
             if self.spectre_recv_timeout_ms <= 0:
                 raise ValueError("--spectre-recv-timeout-ms must be positive")
             if self.spectre_initial_recv_timeout_ms <= 0:
-                raise ValueError(
-                    "--spectre-initial-recv-timeout-ms must be positive"
-                )
+                raise ValueError("--spectre-initial-recv-timeout-ms must be positive")
+            if self.spectre_failure_threshold < 1:
+                raise ValueError("--spectre-failure-threshold must be at least 1")
+            if self.spectre_cooldown_rounds < 1:
+                raise ValueError("--spectre-cooldown-rounds must be at least 1")
             if self.spectre_retry_min_count < 1:
                 raise ValueError("--spectre-retry-min-count must be at least 1")
             if not 0.0 <= self.spectre_retry_fail_ratio <= 1.0:
-                raise ValueError(
-                    "--spectre-retry-fail-ratio must be between 0 and 1"
-                )
+                raise ValueError("--spectre-retry-fail-ratio must be between 0 and 1")
             if self.spectre_draft_timeout_action not in ("fallback", "error"):
                 raise ValueError(
                     "--spectre-draft-timeout-action must be fallback or error"
@@ -3088,7 +3136,11 @@ class ServerArgs:
                     "then Drafter, and run the documented explicit smoke test."
                 )
 
-        if self.specstream_enabled or self.specstream_profile_only:
+        if (
+            self.specstream_enabled
+            or self.specstream_profile_only
+            or (self.specstream_smctrl_enabled and self.spectre_role == "target")
+        ):
             from sglang.srt.speculative.spectre.specstream.config import (
                 SpecStreamConfig,
             )
@@ -3101,25 +3153,54 @@ class ServerArgs:
                 raise ValueError("SpecStream v1 requires --page-size 1")
             if self.speculative_eagle_topk not in (None, 1):
                 raise ValueError("SpecStream v1 requires --speculative-eagle-topk 1")
+            if self.specstream_gpu_reserve_mb < 0:
+                raise ValueError("specstream_gpu_reserve_mb cannot be negative")
+            if self.specstream_tp_straggler_control:
+                if self.tp_size < 2:
+                    raise ValueError(
+                        "--specstream-tp-straggler-control requires --tp-size >= 2"
+                    )
+                if not 0 <= self.specstream_colocated_tp_rank < self.tp_size:
+                    raise ValueError(
+                        "--specstream-colocated-tp-rank must identify a Target TP rank"
+                    )
             SpecStreamConfig.from_server_args(self)
             if not self.disable_radix_cache:
                 self.disable_radix_cache = True
-                logger.warning(
-                    "Radix cache is disabled for SpecStream v1 because sealed CPU "
-                    "History uses an independent Target mapping."
-                )
+                if self.specstream_enabled:
+                    logger.warning(
+                        "Radix cache is disabled for SpecStream v1 because sealed "
+                        "CPU History uses an independent Target mapping."
+                    )
+                else:
+                    logger.warning(
+                        "Radix cache is disabled in native-GPU-KV control-only mode "
+                        "so request-local controller profiles stay comparable."
+                    )
             if not self.disable_cuda_graph:
                 self.disable_cuda_graph = True
-                logger.warning(
-                    "CUDA Graph is disabled for SpecStream v1 TARGET_VERIFY because "
-                    "the path contains CPU-to-GPU stream/event operations."
-                )
+                if self.specstream_enabled:
+                    logger.warning(
+                        "CUDA Graph is disabled for SpecStream v1 TARGET_VERIFY "
+                        "because the path contains CPU-to-GPU stream/event operations."
+                    )
+                else:
+                    logger.warning(
+                        "CUDA Graph is disabled in native-GPU-KV control-only mode "
+                        "to collect per-round Target timings."
+                    )
             if not self.disable_overlap_schedule:
                 self.disable_overlap_schedule = True
-                logger.warning(
-                    "Overlap scheduling is disabled for SpecStream v1 while tiered "
-                    "KV state is committed by the synchronous SPECTRE worker."
-                )
+                if self.specstream_enabled:
+                    logger.warning(
+                        "Overlap scheduling is disabled for SpecStream v1 while "
+                        "tiered KV state is committed by the synchronous SPECTRE worker."
+                    )
+                else:
+                    logger.warning(
+                        "Overlap scheduling is disabled in native-GPU-KV control-only "
+                        "mode so all ranks apply one synchronous q/mode decision."
+                    )
 
         if self.speculative_algorithm in ("EAGLE", "EAGLE3", "STANDALONE"):
             if self.speculative_algorithm == "STANDALONE" and self.enable_dp_attention:
@@ -5144,6 +5225,25 @@ class ServerArgs:
             ),
         )
         parser.add_argument(
+            "--spectre-failure-threshold",
+            type=int,
+            default=ServerArgs.spectre_failure_threshold,
+            help=(
+                "Open the remote-Drafter circuit after this many consecutive "
+                "timeouts. A small value prevents repeated timeout stalls at "
+                "high concurrency."
+            ),
+        )
+        parser.add_argument(
+            "--spectre-cooldown-rounds",
+            type=int,
+            default=ServerArgs.spectre_cooldown_rounds,
+            help=(
+                "Number of q=1 fallback rounds before probing an open remote-"
+                "Drafter circuit again."
+            ),
+        )
+        parser.add_argument(
             "--spectre-fixed-q-mode",
             type=str,
             choices=["ordinary", "parallel"],
@@ -5209,7 +5309,12 @@ class ServerArgs:
             "--specstream-profile-only",
             action="store_true",
             default=ServerArgs.specstream_profile_only,
-            help="Collect SpecStream-compatible profiles without sealing Target KV.",
+            help=(
+                "Keep native SPECTRE Target KV entirely GPU-resident while "
+                "enabling SpecStream-compatible profiling and, when requested, "
+                "the co-execution or TP-straggler controllers. No Target KV is "
+                "sealed, offloaded, or streamed from CPU in this mode."
+            ),
         )
         parser.add_argument(
             "--specstream-full-restore-baseline",
@@ -5272,6 +5377,15 @@ class ServerArgs:
             help="Per-Target-rank CPU History memory budget in GiB.",
         )
         parser.add_argument(
+            "--specstream-gpu-reserve-mb",
+            type=int,
+            default=ServerArgs.specstream_gpu_reserve_mb,
+            help=(
+                "GPU headroom kept outside SGLang's fixed KV pool for "
+                "SpecStream staging and asynchronous D2H seal scratch."
+            ),
+        )
+        parser.add_argument(
             "--specstream-dynamic-q",
             action="store_true",
             default=ServerArgs.specstream_dynamic_q,
@@ -5288,6 +5402,168 @@ class ServerArgs:
             type=float,
             default=ServerArgs.specstream_q_switch_threshold,
             help="Minimum relative estimated gain required to switch mode or q.",
+        )
+        parser.add_argument(
+            "--specstream-coexec-enabled",
+            action="store_true",
+            default=ServerArgs.specstream_coexec_enabled,
+            help=(
+                "Deprecated compatibility switch for the former MPS-centric "
+                "q policy. Use --specstream-smctrl-enabled for Target-priority "
+                "one-token grants backed by an offline TPC profile."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-coexec-draft-pressure-ratio",
+            type=float,
+            default=ServerArgs.specstream_coexec_draft_pressure_ratio,
+            help=(
+                "Start throttling when remote-Drafter RTT P95 reaches this "
+                "fraction of its receive deadline."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-coexec-timeout-rate-threshold",
+            type=float,
+            default=ServerArgs.specstream_coexec_timeout_rate_threshold,
+            help="Draft timeout-rate threshold used by the co-execution safety gate.",
+        )
+        parser.add_argument(
+            "--specstream-coexec-pending-high-watermark",
+            type=int,
+            default=ServerArgs.specstream_coexec_pending_high_watermark,
+            help="Pending draft-request watermark that caps the verification horizon.",
+        )
+        parser.add_argument(
+            "--specstream-coexec-compute-ratio-threshold",
+            type=float,
+            default=ServerArgs.specstream_coexec_compute_ratio_threshold,
+            help=(
+                "Coarse Target compute-ratio threshold that switches the "
+                "colocated controller from COEXEC to THROTTLE."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-coexec-require-mps",
+            action="store_true",
+            default=ServerArgs.specstream_coexec_require_mps,
+            help=(
+                "Compatibility check only: require an MPS environment for the "
+                "two CUDA processes. MPS percentage is not a scheduling input."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-smctrl-enabled",
+            action="store_true",
+            default=ServerArgs.specstream_smctrl_enabled,
+            help=(
+                "Enable Target-priority one-token Draft grants and BulletServe-"
+                "style TPC masking. Requires an offline calibrated "
+                "resource profile and libsmctrl on the Drafter."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-grant-token-quantum",
+            type=int,
+            choices=(1,),
+            default=ServerArgs.specstream_grant_token_quantum,
+            help="Execution-grant quantum. SpecStream v1 requires exactly one token.",
+        )
+        parser.add_argument(
+            "--specstream-coexec-target-slowdown-budget",
+            type=float,
+            default=ServerArgs.specstream_coexec_target_slowdown_budget,
+            help=(
+                "Maximum calibrated Target slowdown allowed for a SLACK_FILL "
+                "profile entry (default: 0.05)."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-coexec-guard-us",
+            type=float,
+            default=ServerArgs.specstream_coexec_guard_us,
+            help="Safety guard subtracted from predicted slack before granting Draft.",
+        )
+        parser.add_argument(
+            "--specstream-coexec-resource-profile-path",
+            type=str,
+            default=ServerArgs.specstream_coexec_resource_profile_path,
+            help="Offline measured JSON table for Target shape/Draft TPC interference.",
+        )
+        parser.add_argument(
+            "--specstream-smctrl-library",
+            type=str,
+            default=ServerArgs.specstream_smctrl_library,
+            help=(
+                "Path to libsmctrl.so. Empty uses SGLANG_SPECSTREAM_SMCTRL_LIBRARY "
+                "or csrc/specstream_smctrl/build/libsmctrl.so."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-smctrl-mask-scope",
+            type=str,
+            choices=("stream", "global"),
+            default=ServerArgs.specstream_smctrl_mask_scope,
+            help=(
+                "TPC mask backend. 'stream' uses the version-specific CUDA "
+                "stream-structure offset. 'global' uses the QMD/TMD launch "
+                "callback for a dedicated Drafter process and supports at most "
+                "64 TPCs. Use global only after validate-global passes."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-smctrl-calibration-tpcs",
+            type=int,
+            default=ServerArgs.specstream_smctrl_calibration_tpcs,
+            help=(
+                "Calibration only: use a fixed Draft TPC count instead of an "
+                "online resource profile. Zero disables calibration mode."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-smctrl-calibration-allow-overlap",
+            action="store_true",
+            default=ServerArgs.specstream_smctrl_calibration_allow_overlap,
+            help=(
+                "Calibration only: issue fixed-TPC grants during Target forward "
+                "to measure interference. Never use for the final online run."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-tp-straggler-control",
+            action="store_true",
+            default=ServerArgs.specstream_tp_straggler_control,
+            help=(
+                "Gather Target forward timings across TP ranks and serialize or "
+                "fall back when the colocated rank exceeds its critical-path budget."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-colocated-tp-rank",
+            type=int,
+            default=ServerArgs.specstream_colocated_tp_rank,
+            help="Target TP rank sharing its physical GPU with the Drafter.",
+        )
+        parser.add_argument(
+            "--specstream-tp-straggler-budget-ms",
+            type=float,
+            default=ServerArgs.specstream_tp_straggler_budget_ms,
+            help="Maximum colocated-rank EMA lead over peer-rank median in milliseconds.",
+        )
+        parser.add_argument(
+            "--specstream-target-slowdown-budget",
+            type=float,
+            default=ServerArgs.specstream_target_slowdown_budget,
+            help=(
+                "Maximum slowest-rank forward slowdown relative to the best "
+                "observed TP critical path before co-execution is throttled."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-tp-monitor-interval",
+            type=int,
+            default=ServerArgs.specstream_tp_monitor_interval,
+            help="Number of Target decisions between TP timing all-gathers.",
         )
         parser.add_argument(
             "--specstream-cohort-enabled",

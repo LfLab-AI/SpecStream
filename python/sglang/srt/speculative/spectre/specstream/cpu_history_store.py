@@ -199,10 +199,13 @@ class CPUHistoryStore:
                     slab.tensor[layer_offset, :take].copy_(
                         packed, non_blocking=non_blocking
                     )
-                    if non_blocking:
-                        # Keep the gather/pack temporaries alive until the D2H
-                        # completion event is observed by complete_seal().
-                        pending_sources.append(packed)
+                    # ``packed`` is produced and consumed on d2h_stream.  Once
+                    # this Python reference is dropped, PyTorch may reuse its
+                    # storage for a later operation on the same stream; CUDA
+                    # stream ordering guarantees that reuse occurs after the
+                    # preceding D2H copy.  Retaining every layer tensor until
+                    # the final event made seal scratch grow as O(num_layers)
+                    # and caused high-concurrency OOMs.
 
                 slab.used_tokens = take
                 self.bytes_used += (
@@ -214,16 +217,26 @@ class CPUHistoryStore:
                     * torch.empty((), dtype=self.dtype).element_size()
                 )
 
-        if use_async:
-            dependency_event = torch.cuda.Event()
-            dependency_event.record(torch.cuda.current_stream(self.device))
-            with torch.cuda.stream(self.d2h_stream):
-                self.d2h_stream.wait_event(dependency_event)
-                enqueue_copies(non_blocking=True)
-                final_event = torch.cuda.Event()
-                final_event.record(self.d2h_stream)
-        else:
-            enqueue_copies(non_blocking=False)
+        try:
+            if use_async:
+                dependency_event = torch.cuda.Event()
+                dependency_event.record(torch.cuda.current_stream(self.device))
+                with torch.cuda.stream(self.d2h_stream):
+                    self.d2h_stream.wait_event(dependency_event)
+                    enqueue_copies(non_blocking=True)
+                    final_event = torch.cuda.Event()
+                    final_event.record(self.d2h_stream)
+            else:
+                enqueue_copies(non_blocking=False)
+        except Exception:
+            # Keep allocation/accounting transactional.  This path is only for
+            # recovery (for example a CUDA OOM while gathering KV), so waiting
+            # for already-enqueued D2H work is preferable to leaking pinned
+            # slabs and corrupting the per-request History chain.
+            if use_async and self.d2h_stream is not None:
+                self.d2h_stream.synchronize()
+            self._discard_new_slabs(rid, block_ids)
+            raise
 
         for slab, _, _ in slabs_to_fill:
             slab.ready_event = final_event
@@ -301,6 +314,28 @@ class CPUHistoryStore:
 
     def request_block_ids(self, rid: str) -> list[int]:
         return list(self._request_slabs.get(rid, ()))
+
+    def _discard_new_slabs(self, rid: str, block_ids: list[int]) -> None:
+        discard = set(block_ids)
+        request_ids = self._request_slabs.get(rid, [])
+        self._request_slabs[rid] = [
+            value for value in request_ids if value not in discard
+        ]
+        if not self._request_slabs[rid]:
+            self._request_slabs.pop(rid, None)
+        for slab_id in block_ids:
+            slab = self._slabs.pop(slab_id, None)
+            if slab is None:
+                continue
+            self.bytes_reserved -= slab.nbytes
+            self.bytes_used -= (
+                slab.used_tokens
+                * len(self.layer_ids)
+                * 2
+                * self.kv_heads
+                * self.head_dim
+                * slab.tensor.element_size()
+            )
 
     def release(self, rid: str) -> None:
         for slab_id in self._request_slabs.pop(rid, []):

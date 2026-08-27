@@ -15,6 +15,9 @@ from sglang.srt.speculative.spectre.specstream.cohort_scheduler import (
     build_cohort_plans,
 )
 from sglang.srt.speculative.spectre.specstream.config import SpecStreamConfig
+from sglang.srt.speculative.spectre.specstream.coexec_runtime import (
+    TargetGrantRuntime,
+)
 from sglang.srt.speculative.spectre.specstream.controller import (
     IOAwareController,
     SpecStreamDecision,
@@ -27,6 +30,13 @@ from sglang.srt.speculative.spectre.specstream.cpu_history_store import (
 from sglang.srt.speculative.spectre.specstream.diagnostics import (
     SpecStreamDiagnostics,
 )
+from sglang.srt.speculative.spectre.specstream.gpu_grant_controller import (
+    GpuGrantController,
+)
+from sglang.srt.speculative.spectre.specstream.mps_env import read_mps_environment
+from sglang.srt.speculative.spectre.specstream.multi_gpu_tp_policy import (
+    MultiGPUTPPolicy,
+)
 from sglang.srt.speculative.spectre.specstream.online_softmax import (
     OnlineSoftmaxState,
     finalize_online_softmax_state,
@@ -34,15 +44,25 @@ from sglang.srt.speculative.spectre.specstream.online_softmax import (
     update_online_softmax_state,
 )
 from sglang.srt.speculative.spectre.specstream.profiler import SpecStreamProfiler
+from sglang.srt.speculative.spectre.specstream.resource_profile import (
+    ResourceProfile,
+    context_bucket,
+)
 from sglang.srt.speculative.spectre.specstream.round_meta import (
     SpecStreamRequestMeta,
     SpecStreamRoundMeta,
 )
+from sglang.srt.speculative.spectre.specstream.slack_profiler import SlackProfiler
 from sglang.srt.speculative.spectre.specstream.staging_runtime import (
     StagingTransfer,
     StagingWindowPool,
 )
 from sglang.srt.speculative.spectre.specstream.state import TargetTieredKVState
+from sglang.srt.speculative.spectre.specstream.tp_straggler_monitor import (
+    TPRankSample,
+    TPStragglerMonitor,
+    TPStragglerSnapshot,
+)
 from sglang.srt.speculative.spectre.specstream.triton_stream_attn import (
     split_packed_history_cohort_state,
     stack_packed_history_cohort_states,
@@ -53,6 +73,11 @@ from sglang.srt.speculative.spectre.specstream.triton_stream_attn import (
 
 logger = logging.getLogger(__name__)
 
+# Host-packing a large cohort saves DMA descriptors but copies the complete KV
+# payload once more on the scheduler thread.  Beyond this size the CPU copy is
+# normally more expensive than enqueueing direct pinned-slab H2D operations.
+_MAX_SYNCHRONOUS_COHORT_PACK_BYTES = 32 * 1024 * 1024
+
 
 @dataclass
 class _PendingSeal:
@@ -62,6 +87,14 @@ class _PendingSeal:
     seal_end: int
     slots: torch.Tensor
     ticket: SealTicket
+
+
+@dataclass
+class _BatchedLayerPrefetch:
+    """First bounded-window transfers queued for a later transformer layer."""
+
+    task_keys: tuple[tuple[object, ...], ...]
+    transfers: dict[int, StagingTransfer]
 
 
 def _group_adjacent_chunks(chunks, group_size: int):
@@ -101,12 +134,20 @@ class SpecStreamVerifier:
         self.staging = staging
         self.profiler = profiler
         self.diagnostics = diagnostics
-        # Single-request B3 can safely retain both bounded staging slots across
-        # transformer layers.  Copies for layer L+1 are queued while layer L's
-        # tail attention and MLP are still running.
+        # Single-request B3 retains both bounded staging slots across
+        # transformer layers.  Multi-request paths below use a separate global
+        # work queue because these slots are shared by every request/cohort.
         self._single_layer_prefetch: dict[
             tuple[int, str, int], dict[int, StagingTransfer]
         ] = {}
+        # Multi-request prefetch is stored per *whole ordered work queue*, not
+        # per request.  The staging slots are global, so request-private
+        # prefetch queues would overwrite one another at concurrency > 1.
+        self._batched_layer_prefetch: dict[
+            tuple[int, int, str, tuple[str, ...]], _BatchedLayerPrefetch
+        ] = {}
+        self._logged_batched_prefetch_modes: set[str] = set()
+        self._logged_direct_cohort_staging = False
 
     def forward(self, *, q, k_new, v_new, forward_batch, meta, layer):
         if self._single_layer_prefetch:
@@ -115,6 +156,12 @@ class SpecStreamVerifier:
             ]
             for key in stale_keys:
                 del self._single_layer_prefetch[key]
+        if self._batched_layer_prefetch:
+            stale_keys = [
+                key for key in self._batched_layer_prefetch if key[0] != meta.round_id
+            ]
+            for key in stale_keys:
+                del self._batched_layer_prefetch[key]
         if layer.is_cross_attention:
             raise RuntimeError("SpecStream does not support cross attention")
         if layer.sliding_window_size is not None and layer.sliding_window_size > -1:
@@ -150,7 +197,24 @@ class SpecStreamVerifier:
                     item, queries[item.rid], states[item.rid], meta, layer
                 )
         elif meta.cohort_enabled and len(stream_items) > 1:
-            self._stream_history_cohorts(stream_items, queries, states, meta, layer)
+            self._stream_history_cohorts(
+                stream_items,
+                queries,
+                states,
+                meta,
+                layer,
+                prefetch_next_layer=(
+                    self.config.layer_prefetch and not self.config.reference_attention
+                ),
+            )
+        elif (
+            self.config.layer_prefetch
+            and not self.config.reference_attention
+            and len(stream_items) > 1
+        ):
+            self._stream_history_independent_batch(
+                stream_items, queries, states, meta, layer
+            )
         else:
             allow_layer_prefetch = self.config.layer_prefetch and len(stream_items) == 1
             for item in stream_items:
@@ -301,6 +365,36 @@ class SpecStreamVerifier:
             1 if self.config.reference_attention else self.config.chunks_per_transfer
         )
         chunk_groups = _group_adjacent_chunks(chunks, group_size)
+        next_prefetch = None
+
+        def prefetch_next(available_slots=None):
+            nonlocal next_prefetch
+            if next_prefetch is None:
+                next_layer_id = self._next_history_layer_id(int(layer.layer_id))
+                if next_layer_id is None:
+                    next_prefetch = ()
+                else:
+                    next_chunks = list(
+                        self.history_store.iter_layer_chunks(
+                            item.rid,
+                            next_layer_id,
+                            history_end=item.history_len,
+                        )
+                    )
+                    next_prefetch = (
+                        next_layer_id,
+                        _group_adjacent_chunks(
+                            next_chunks, self.config.chunks_per_transfer
+                        ),
+                    )
+            self._prefetch_next_single_layer(
+                item,
+                meta,
+                layer,
+                available_slots=available_slots,
+                prepared=next_prefetch,
+            )
+
         prefetch_key = (meta.round_id, item.rid, int(layer.layer_id))
         transfers = self._single_layer_prefetch.pop(prefetch_key, {})
         for index in range(min(self.staging.num_buffers, len(chunk_groups))):
@@ -332,43 +426,301 @@ class SpecStreamVerifier:
                     [chunk.tensor for chunk in chunk_groups[next_index]],
                     transfer.slot,
                 )
+            elif prefetch_next_layer and not self.config.reference_attention:
+                # The ring slot is no longer needed by layer L.  Reuse it for
+                # L+1 immediately, while the other slot can still be running
+                # the final History-attention group.  Waiting until the whole
+                # History loop finishes leaves only Tail/OProj/MLP as overlap.
+                prefetch_next((transfer.slot,))
         if prefetch_next_layer and not self.config.reference_attention:
-            self._prefetch_next_single_layer(item, meta, layer)
+            # Covers short/empty rings and fills any bounded slot which was not
+            # stolen above.  Existing early transfers are merged, never redone.
+            prefetch_next()
         return state
 
-    def _prefetch_next_single_layer(self, item, meta, layer) -> None:
-        try:
-            layer_offset = self.history_store.layer_ids.index(int(layer.layer_id))
-        except ValueError:
+    def _prefetch_next_single_layer(
+        self, item, meta, layer, *, available_slots=None, prepared=None
+    ) -> None:
+        if prepared is None:
+            next_layer_id = self._next_history_layer_id(int(layer.layer_id))
+            if next_layer_id is None:
+                return
+            chunks = list(
+                self.history_store.iter_layer_chunks(
+                    item.rid, next_layer_id, history_end=item.history_len
+                )
+            )
+            chunk_groups = _group_adjacent_chunks(
+                chunks, self.config.chunks_per_transfer
+            )
+        elif not prepared:
             return
+        else:
+            next_layer_id, chunk_groups = prepared
+        if not chunk_groups:
+            return
+        key = (meta.round_id, item.rid, next_layer_id)
+        transfers = self._single_layer_prefetch.setdefault(key, {})
+        slots = (
+            tuple(range(self.staging.num_buffers))
+            if available_slots is None
+            else tuple(int(slot) for slot in available_slots)
+        )
+        used_slots = {transfer.slot for transfer in transfers.values()}
+        prefetch_limit = min(self.staging.num_buffers, len(chunk_groups))
+        for slot in slots:
+            if slot in used_slots:
+                continue
+            index = next(
+                (
+                    candidate
+                    for candidate in range(prefetch_limit)
+                    if candidate not in transfers
+                ),
+                None,
+            )
+            if index is None:
+                break
+            transfers[index] = self.staging.submit_many(
+                [chunk.tensor for chunk in chunk_groups[index]], slot
+            )
+            used_slots.add(slot)
+
+    def _next_history_layer_id(self, layer_id: int) -> int | None:
+        try:
+            layer_offset = self.history_store.layer_ids.index(int(layer_id))
+        except ValueError:
+            return None
         next_offset = layer_offset + 1
         if next_offset >= len(self.history_store.layer_ids):
-            return
-        next_layer_id = self.history_store.layer_ids[next_offset]
-        chunks = list(
-            self.history_store.iter_layer_chunks(
-                item.rid, next_layer_id, history_end=item.history_len
-            )
+            return None
+        return int(self.history_store.layer_ids[next_offset])
+
+    def _batched_prefetch_key(self, meta, layer_id: int, mode: str, items):
+        return (
+            int(meta.round_id),
+            int(layer_id),
+            mode,
+            tuple(item.rid for item in items),
         )
-        if not chunks:
-            return
-        chunk_groups = _group_adjacent_chunks(chunks, self.config.chunks_per_transfer)
-        transfers = {}
-        for index in range(min(self.staging.num_buffers, len(chunk_groups))):
-            transfers[index] = self.staging.submit_many(
-                [chunk.tensor for chunk in chunk_groups[index]], index
+
+    def _take_batched_prefetch(
+        self, *, meta, layer_id: int, mode: str, items, task_keys
+    ) -> dict[int, StagingTransfer]:
+        key = self._batched_prefetch_key(meta, layer_id, mode, items)
+        cached = self._batched_layer_prefetch.pop(key, None)
+        if cached is None:
+            return {}
+        if cached.task_keys != tuple(task_keys):
+            # Request order, history geometry, or cohort membership changed.
+            # Copies already submitted on the copy stream are harmless, but
+            # their slot views must never be consumed with different metadata.
+            logger.debug("Discarding incompatible SpecStream layer prefetch")
+            return {}
+        logged_modes = getattr(self, "_logged_batched_prefetch_modes", set())
+        if mode not in logged_modes:
+            logger.info(
+                "SpecStream multi-request layer prefetch active: "
+                "mode=%s requests=%d queued_transfers=%d",
+                mode,
+                len(items),
+                len(cached.transfers),
             )
-        self._single_layer_prefetch[(meta.round_id, item.rid, next_layer_id)] = (
-            transfers
+            logged_modes.add(mode)
+            self._logged_batched_prefetch_modes = logged_modes
+        return cached.transfers
+
+    def _store_batched_prefetch(
+        self,
+        *,
+        meta,
+        layer_id: int,
+        mode: str,
+        items,
+        task_keys,
+        transfers: dict[int, StagingTransfer],
+    ) -> None:
+        if not transfers:
+            return
+        key = self._batched_prefetch_key(meta, layer_id, mode, items)
+        task_keys = tuple(task_keys)
+        cached = self._batched_layer_prefetch.get(key)
+        if cached is not None and cached.task_keys == task_keys:
+            merged = dict(cached.transfers)
+            for task_index, transfer in transfers.items():
+                merged.setdefault(task_index, transfer)
+            transfers = merged
+        self._batched_layer_prefetch[key] = _BatchedLayerPrefetch(
+            task_keys=task_keys, transfers=transfers
+        )
+
+    def _build_independent_tasks(self, items, layer_id: int):
+        tasks = []
+        task_keys = []
+        for item in items:
+            chunks = list(
+                self.history_store.iter_layer_chunks(
+                    item.rid, layer_id, history_end=item.history_len
+                )
+            )
+            if sum(chunk.length for chunk in chunks) != item.history_len:
+                raise AssertionError("CPU History length does not match tiered state")
+            groups = _group_adjacent_chunks(chunks, self.config.chunks_per_transfer)
+            for group_index, chunk_group in enumerate(groups):
+                tasks.append((item, chunk_group))
+                task_keys.append(("request", item.rid, group_index))
+        return tasks, tuple(task_keys)
+
+    def _stream_history_independent_batch(
+        self, items, queries, states, meta, layer
+    ) -> None:
+        """Pipeline a multi-request layer through the shared bounded slots.
+
+        This is the non-cohort fallback.  It deliberately flattens all request
+        chunks into one queue: the staging pool is global, so independently
+        prefetching two slots for every request is unsafe at concurrency > 1.
+        """
+
+        tasks, task_keys = self._build_independent_tasks(items, int(layer.layer_id))
+        next_prefetch = None
+
+        def prefetch_next(available_slots=None):
+            nonlocal next_prefetch
+            if next_prefetch is None:
+                next_layer_id = self._next_history_layer_id(int(layer.layer_id))
+                if next_layer_id is None:
+                    next_prefetch = ()
+                else:
+                    next_tasks, next_task_keys = self._build_independent_tasks(
+                        items, next_layer_id
+                    )
+                    next_prefetch = (
+                        next_layer_id,
+                        next_tasks,
+                        next_task_keys,
+                    )
+            self._prefetch_next_independent_layer(
+                items,
+                meta,
+                layer,
+                available_slots=available_slots,
+                prepared=next_prefetch,
+            )
+
+        transfers = self._take_batched_prefetch(
+            meta=meta,
+            layer_id=int(layer.layer_id),
+            mode="independent",
+            items=items,
+            task_keys=task_keys,
+        )
+
+        def submit_task(task_index: int, slot: int):
+            _, chunk_group = tasks[task_index]
+            return self.staging.submit_many(
+                [chunk.tensor for chunk in chunk_group], slot
+            )
+
+        for task_index in range(min(self.staging.num_buffers, len(tasks))):
+            if task_index not in transfers:
+                transfers[task_index] = submit_task(task_index, task_index)
+
+        for task_index, (item, _) in enumerate(tasks):
+            transfer = transfers.pop(task_index)
+            packed = self.staging.wait_ready(transfer)
+            started = time.perf_counter()
+            states[item.rid] = self._update_history_state(
+                states[item.rid],
+                queries[item.rid],
+                packed,
+                meta=meta,
+                item=item,
+                layer=layer,
+            )
+            self.profiler.record_attention(
+                meta.round_id, (time.perf_counter() - started) * 1000
+            )
+            self.profiler.record_h2d(
+                meta.round_id,
+                transfer.nbytes,
+                (time.perf_counter_ns() - transfer.submitted_ns) / 1e6,
+            )
+            self.staging.mark_consumed(transfer)
+            next_index = task_index + self.staging.num_buffers
+            if next_index < len(tasks):
+                transfers[next_index] = submit_task(next_index, transfer.slot)
+            else:
+                prefetch_next((transfer.slot,))
+
+        prefetch_next()
+
+    def _prefetch_next_independent_layer(
+        self, items, meta, layer, *, available_slots=None, prepared=None
+    ) -> None:
+        if prepared is None:
+            next_layer_id = self._next_history_layer_id(int(layer.layer_id))
+            if next_layer_id is None:
+                return
+            tasks, task_keys = self._build_independent_tasks(items, next_layer_id)
+        elif not prepared:
+            return
+        else:
+            next_layer_id, tasks, task_keys = prepared
+        key = self._batched_prefetch_key(meta, next_layer_id, "independent", items)
+        cached = self._batched_layer_prefetch.get(key)
+        transfers = (
+            dict(cached.transfers)
+            if cached is not None and cached.task_keys == tuple(task_keys)
+            else {}
+        )
+        slots = (
+            tuple(range(self.staging.num_buffers))
+            if available_slots is None
+            else tuple(int(slot) for slot in available_slots)
+        )
+        used_slots = {transfer.slot for transfer in transfers.values()}
+        prefetch_limit = min(self.staging.num_buffers, len(tasks))
+        new_transfers = {}
+        for slot in slots:
+            if slot in used_slots:
+                continue
+            task_index = next(
+                (
+                    candidate
+                    for candidate in range(prefetch_limit)
+                    if candidate not in transfers
+                ),
+                None,
+            )
+            if task_index is None:
+                break
+            _, chunk_group = tasks[task_index]
+            transfer = self.staging.submit_many(
+                [chunk.tensor for chunk in chunk_group], slot
+            )
+            transfers[task_index] = transfer
+            new_transfers[task_index] = transfer
+            used_slots.add(slot)
+        self._store_batched_prefetch(
+            meta=meta,
+            layer_id=next_layer_id,
+            mode="independent",
+            items=items,
+            task_keys=task_keys,
+            transfers=new_transfers,
         )
 
     def discard_layer_prefetch(self, rid: str | None = None) -> None:
         if rid is None:
             self._single_layer_prefetch.clear()
+            self._batched_layer_prefetch.clear()
             return
         stale_keys = [key for key in self._single_layer_prefetch if key[1] == rid]
         for key in stale_keys:
             del self._single_layer_prefetch[key]
+        stale_keys = [key for key in self._batched_layer_prefetch if rid in key[3]]
+        for key in stale_keys:
+            del self._batched_layer_prefetch[key]
 
     def _restore_history(self, item, query, state, meta, layer):
         chunks = list(
@@ -403,11 +755,11 @@ class SpecStreamVerifier:
         self.profiler.record_attention(meta.round_id, elapsed)
         return state
 
-    def _stream_history_cohorts(self, items, queries, states, meta, layer) -> None:
+    def _build_cohort_layer_work(self, items, meta, layer_id: int):
         chunks_by_rid = {
             item.rid: list(
                 self.history_store.iter_layer_chunks(
-                    item.rid, layer.layer_id, history_end=item.history_len
+                    item.rid, layer_id, history_end=item.history_len
                 )
             )
             for item in items
@@ -438,7 +790,7 @@ class SpecStreamVerifier:
                 StreamWorkItem(
                     rid=item.rid,
                     round_id=meta.round_id,
-                    layer_id=layer.layer_id,
+                    layer_id=layer_id,
                     q_len=meta.q_len,
                     chunk_idx=0,
                     token_begin=first_group[0].abs_start,
@@ -453,8 +805,117 @@ class SpecStreamVerifier:
             max_cohort_size=self.config.max_cohort_size,
             num_staging_slots=self.staging.num_buffers,
             max_cohort_delay_us=self.config.max_cohort_delay_us,
+            # These requests are already members of one scheduled verify
+            # batch; no additional cohort wait occurs here.  Using wall clock
+            # after Python descriptor construction made a 200-us deadline
+            # expire at c=16/32, silently turning every plan into size 1 and
+            # also invalidating the prefetched next-layer plan.  Deadline
+            # expiry belongs at admission/scheduling, not inside layer replay.
+            now_ns=deadline_ns - 1,
         )
 
+        tasks = []
+        task_keys = []
+        for plan in plans:
+            max_plan_groups = max(len(groups_by_rid[work.rid]) for work in plan.items)
+            plan_rids = tuple(work.rid for work in plan.items)
+            for group_index in range(max_plan_groups):
+                tasks.append((plan, group_index))
+                task_keys.append(("cohort", plan_rids, group_index))
+        return groups_by_rid, request_by_rid, plans, tasks, tuple(task_keys)
+
+    def _submit_cohort_task(
+        self, task, groups_by_rid, slot: int, *, direct_async: bool = False
+    ):
+        plan, group_index = task
+        source_groups = []
+        for work in plan.items:
+            request_groups = groups_by_rid[work.rid]
+            chunk_group = (
+                request_groups[group_index] if group_index < len(request_groups) else ()
+            )
+            source_groups.append([chunk.tensor for chunk in chunk_group])
+        source_bytes = sum(
+            int(source.nbytes) for group in source_groups for source in group
+        )
+        avoid_sync_pack = (
+            direct_async or source_bytes >= _MAX_SYNCHRONOUS_COHORT_PACK_BYTES
+        )
+        if avoid_sync_pack:
+            if not direct_async and not getattr(
+                self, "_logged_direct_cohort_staging", False
+            ):
+                logger.info(
+                    "SpecStream cohort uses direct async H2D above %d MiB "
+                    "to avoid synchronous CPU packing",
+                    _MAX_SYNCHRONOUS_COHORT_PACK_BYTES // (1024 * 1024),
+                )
+                self._logged_direct_cohort_staging = True
+            return self.staging.submit_cohort_groups_direct_async(source_groups, slot)
+        return self.staging.submit_cohort_groups(source_groups, slot)
+
+    def _stream_history_cohorts(
+        self,
+        items,
+        queries,
+        states,
+        meta,
+        layer,
+        *,
+        prefetch_next_layer: bool = False,
+    ) -> None:
+        (
+            groups_by_rid,
+            request_by_rid,
+            plans,
+            tasks,
+            task_keys,
+        ) = self._build_cohort_layer_work(items, meta, int(layer.layer_id))
+        next_prefetch = None
+
+        def prefetch_next(available_slots=None):
+            nonlocal next_prefetch
+            if next_prefetch is None:
+                next_layer_id = self._next_history_layer_id(int(layer.layer_id))
+                if next_layer_id is None:
+                    next_prefetch = ()
+                else:
+                    (
+                        next_groups_by_rid,
+                        _,
+                        _,
+                        next_tasks,
+                        next_task_keys,
+                    ) = self._build_cohort_layer_work(items, meta, next_layer_id)
+                    next_prefetch = (
+                        next_layer_id,
+                        next_groups_by_rid,
+                        next_tasks,
+                        next_task_keys,
+                    )
+            self._prefetch_next_cohort_layer(
+                items,
+                meta,
+                layer,
+                available_slots=available_slots,
+                prepared=next_prefetch,
+            )
+
+        transfers = self._take_batched_prefetch(
+            meta=meta,
+            layer_id=int(layer.layer_id),
+            mode="cohort",
+            items=items,
+            task_keys=task_keys,
+        )
+
+        for task_index in range(min(self.staging.num_buffers, len(tasks))):
+            if task_index not in transfers:
+                transfers[task_index] = self._submit_cohort_task(
+                    tasks[task_index], groups_by_rid, task_index
+                )
+
+        task_index = 0
         for plan in plans:
             cohort_queries = torch.stack([queries[work.rid] for work in plan.items])
             max_plan_groups = max(len(groups_by_rid[work.rid]) for work in plan.items)
@@ -464,27 +925,11 @@ class SpecStreamVerifier:
                     [states[work.rid] for work in plan.items]
                 )
 
-            def submit_group(group_index: int, slot: int):
-                source_groups = []
-                for work in plan.items:
-                    request_groups = groups_by_rid[work.rid]
-                    chunk_group = (
-                        request_groups[group_index]
-                        if group_index < len(request_groups)
-                        else ()
-                    )
-                    source_groups.append([chunk.tensor for chunk in chunk_group])
-                return self.staging.submit_cohort_groups(source_groups, slot)
-
-            # Queue one transfer per bounded slot before launching attention.
-            # Later iterations refill the slot consumed num_buffers groups ago,
-            # exactly like the single-request B3 pipeline.
-            transfers = {}
-            for group_index in range(min(self.staging.num_buffers, max_plan_groups)):
-                transfers[group_index] = submit_group(group_index, group_index)
-
             for group_index in range(max_plan_groups):
-                transfer = transfers.pop(group_index)
+                expected_plan, expected_group = tasks[task_index]
+                if expected_plan is not plan or expected_group != group_index:
+                    raise AssertionError("SpecStream cohort work queue is inconsistent")
+                transfer = transfers.pop(task_index)
                 packed = self.staging.wait_ready(transfer)
                 started = time.perf_counter()
                 if self.config.reference_attention:
@@ -522,15 +967,85 @@ class SpecStreamVerifier:
                 )
                 self.profiler.record_attention(meta.round_id, elapsed)
                 self.staging.mark_consumed(transfer)
-                next_index = group_index + self.staging.num_buffers
-                if next_index < max_plan_groups:
-                    transfers[next_index] = submit_group(next_index, transfer.slot)
+                next_index = task_index + self.staging.num_buffers
+                if next_index < len(tasks):
+                    transfers[next_index] = self._submit_cohort_task(
+                        tasks[next_index], groups_by_rid, transfer.slot
+                    )
+                elif prefetch_next_layer:
+                    prefetch_next((transfer.slot,))
+                task_index += 1
 
             if batched_state is not None:
                 for work, new_state in zip(
                     plan.items, split_packed_history_cohort_state(batched_state)
                 ):
                     states[work.rid] = new_state
+
+        if task_index != len(tasks):
+            raise AssertionError("SpecStream did not consume the full cohort queue")
+        if prefetch_next_layer:
+            prefetch_next()
+
+    def _prefetch_next_cohort_layer(
+        self, items, meta, layer, *, available_slots=None, prepared=None
+    ) -> None:
+        if prepared is None:
+            next_layer_id = self._next_history_layer_id(int(layer.layer_id))
+            if next_layer_id is None:
+                return
+            groups_by_rid, _, _, tasks, task_keys = self._build_cohort_layer_work(
+                items, meta, next_layer_id
+            )
+        elif not prepared:
+            return
+        else:
+            next_layer_id, groups_by_rid, tasks, task_keys = prepared
+        key = self._batched_prefetch_key(meta, next_layer_id, "cohort", items)
+        cached = self._batched_layer_prefetch.get(key)
+        transfers = (
+            dict(cached.transfers)
+            if cached is not None and cached.task_keys == tuple(task_keys)
+            else {}
+        )
+        slots = (
+            tuple(range(self.staging.num_buffers))
+            if available_slots is None
+            else tuple(int(slot) for slot in available_slots)
+        )
+        used_slots = {transfer.slot for transfer in transfers.values()}
+        prefetch_limit = min(self.staging.num_buffers, len(tasks))
+        new_transfers = {}
+        for slot in slots:
+            if slot in used_slots:
+                continue
+            task_index = next(
+                (
+                    candidate
+                    for candidate in range(prefetch_limit)
+                    if candidate not in transfers
+                ),
+                None,
+            )
+            if task_index is None:
+                break
+            transfer = self._submit_cohort_task(
+                tasks[task_index],
+                groups_by_rid,
+                slot,
+                direct_async=True,
+            )
+            transfers[task_index] = transfer
+            new_transfers[task_index] = transfer
+            used_slots.add(slot)
+        self._store_batched_prefetch(
+            meta=meta,
+            layer_id=next_layer_id,
+            mode="cohort",
+            items=items,
+            task_keys=task_keys,
+            transfers=new_transfers,
+        )
 
 
 class SpecStreamTargetRuntime:
@@ -556,6 +1071,37 @@ class SpecStreamTargetRuntime:
         self.states: dict[str, TargetTieredKVState] = {}
         self._pending_seals: dict[str, _PendingSeal] = {}
         self._round_id = 0
+        self._tp_sync_counter = 0
+
+        self.mps_environment = read_mps_environment()
+        if config.profile_only:
+            logger.info(
+                "SpecStream control-only mode: native SPECTRE Target KV remains "
+                "GPU-resident; CPU History sealing and H2D streaming are disabled"
+            )
+        if config.coexec_require_mps and not self.mps_environment.configured:
+            raise RuntimeError(
+                "SpecStream co-execution requires CUDA MPS, but the Target "
+                "process has no visible MPS quota, partition or pipe directory"
+            )
+        if config.coexec_enabled and not config.smctrl_enabled:
+            logger.warning(
+                "--specstream-coexec-enabled no longer changes q or grants GPU "
+                "execution; enable --specstream-smctrl-enabled with a calibrated "
+                "profile for innovation point 2"
+            )
+        if config.smctrl_enabled:
+            logger.info(
+                "SpecStream Target-priority SM control: mps=%s "
+                "active_threads=%s priority=%s partition=%s profile=%s",
+                self.mps_environment.configured,
+                self.mps_environment.active_thread_percentage,
+                self.mps_environment.client_priority,
+                self.mps_environment.sm_partition or "none",
+                config.coexec_resource_profile_path,
+            )
+        if config.colocated_tp_rank >= self.tp_size:
+            raise ValueError("SpecStream colocated TP rank is outside the TP group")
 
         kv_pool = self.token_to_kv_pool
         if not all(
@@ -619,14 +1165,77 @@ class SpecStreamTargetRuntime:
                 self.staging.allocated_bytes,
                 self.staging.allocated_host_bytes,
             )
-        self.profiler = SpecStreamProfiler(config.profile_path, tp_rank, tp_size)
+        calibrated_h2d_gbps = (
+            self.staging.calibrate_h2d_gbps()
+            if config.enabled and not config.full_restore_baseline
+            else 0.0
+        )
+        if calibrated_h2d_gbps > 0:
+            logger.info(
+                "SpecStream pinned H2D startup calibration: %.3f GB/s",
+                calibrated_h2d_gbps,
+            )
+        self.profiler = SpecStreamProfiler(
+            config.profile_path,
+            tp_rank,
+            tp_size,
+            mps_environment=self.mps_environment,
+            calibrated_h2d_gbps=calibrated_h2d_gbps,
+        )
         self.diagnostics = SpecStreamDiagnostics(
             config.profile_path, config.shadow_attention
         )
         self.acceptance_tracker = AcceptanceTracker()
+        self.slack_profiler = SlackProfiler()
+        self.grant_runtime = None
+        if config.smctrl_enabled:
+            calibration = config.smctrl_calibration_tpcs > 0
+            resource_profile = (
+                None
+                if calibration
+                else ResourceProfile.load(config.coexec_resource_profile_path)
+            )
+            self.grant_runtime = TargetGrantRuntime(
+                GpuGrantController(
+                    resource_profile,
+                    target_slowdown_budget=(config.coexec_target_slowdown_budget),
+                    guard_us=config.coexec_guard_us,
+                    calibration_tpcs=config.smctrl_calibration_tpcs,
+                    calibration_allow_overlap=(config.smctrl_calibration_allow_overlap),
+                )
+            )
+            if calibration:
+                logger.warning(
+                    "SpecStream calibration mode: fixed Draft TPCs=%d overlap=%s; "
+                    "do not report this as the online controller",
+                    config.smctrl_calibration_tpcs,
+                    config.smctrl_calibration_allow_overlap,
+                )
+        controller_candidates = (
+            config.q_candidates if config.dynamic_q else (config.default_q,)
+        )
         self.controller = (
-            IOAwareController(config.q_candidates, config.q_switch_threshold)
-            if config.dynamic_q
+            IOAwareController(
+                controller_candidates,
+                config.q_switch_threshold,
+                multi_gpu_policy=(
+                    MultiGPUTPPolicy(
+                        rank_skew_budget_ms=config.tp_straggler_budget_ms,
+                        target_slowdown_budget=config.target_slowdown_budget,
+                    )
+                    if config.tp_straggler_control
+                    else None
+                ),
+            )
+            if (config.dynamic_q or config.tp_straggler_control)
+            else None
+        )
+        self.tp_monitor = (
+            TPStragglerMonitor(
+                tp_size=self.tp_size,
+                colocated_rank=config.colocated_tp_rank,
+            )
+            if config.tp_straggler_control
             else None
         )
         self.verifier = SpecStreamVerifier(
@@ -695,15 +1304,37 @@ class SpecStreamTargetRuntime:
             missing_draft_count=len(
                 getattr(batch, "spectre_missing_draft_rids", ()) or ()
             ),
+            coexec_mode=str(
+                getattr(
+                    getattr(batch, "specstream_decision", None),
+                    "coexec_mode",
+                    "COEXEC" if mode == "parallel" else "SERIALIZE",
+                )
+            ),
         )
         self.profiler.begin_round(meta, chunk_tokens=self.config.chunk_tokens)
         batch.specstream_meta = meta
         spec_info.specstream_meta = meta
         return meta
 
-    def record_target_forward(self, meta, elapsed_ms: float) -> None:
+    def record_target_forward(
+        self, meta, elapsed_ms: float, enqueue_ms: float = 0.0
+    ) -> None:
+        self.slack_profiler.record_target_phase("target_forward", elapsed_ms)
+        if self.grant_runtime is not None:
+            self.grant_runtime.record_target_forward(elapsed_ms)
         if meta is not None:
-            self.profiler.record_target_forward(meta.round_id, elapsed_ms)
+            self.profiler.record_target_forward(
+                meta.round_id, elapsed_ms, enqueue_ms=enqueue_ms
+            )
+            if self.tp_monitor is not None:
+                self.tp_monitor.record_local(
+                    TPRankSample(
+                        rank=self.tp_rank,
+                        round_id=meta.round_id,
+                        target_forward_ms=float(elapsed_ms),
+                    )
+                )
 
     def record_logit_margin(self, meta, logits) -> None:
         if meta is not None:
@@ -748,11 +1379,13 @@ class SpecStreamTargetRuntime:
         self._poll_pending_seals()
 
     def after_extend(self, batch) -> None:
-        """Publish prefill state without sealing during prefix-cache bookkeeping.
+        """Publish prefill state and seal only requests whose prefill is complete.
 
         A retracted sticky request may be re-prefilled.  In that case its CPU
         History remains authoritative, so discard the newly materialized GPU
         copy of the already sealed prefix after the forward has completed.
+        Intermediate chunked-prefill requests must remain fully GPU-resident
+        because their next extend attention still consumes the full prefix.
         """
         self._poll_pending_seals()
         for index, req in enumerate(batch.reqs):
@@ -780,7 +1413,13 @@ class SpecStreamTargetRuntime:
                     ] = 0
                 state.committed_len = committed_len
                 state.logical_len = committed_len
+            if getattr(req, "is_chunked", 0) <= 0:
+                # Start offload as soon as the final prefill chunk has produced
+                # its KV.  Waiting for the first verify round lets many long
+                # prompts fill the token pool before any slot is recycled.
+                self._maybe_seal(req, state)
             self._publish_req_state(req, state, "parallel", 1)
+        self._poll_pending_seals()
 
     def _maybe_seal(self, req, state: TargetTieredKVState) -> None:
         if (
@@ -907,20 +1546,149 @@ class SpecStreamTargetRuntime:
     def choose_decision(self, batch) -> SpecStreamDecision | None:
         if self.controller is None:
             return None
+        q_candidates = self.controller.q_candidates
         return self.controller.choose(
             self.collect_batch_state(batch),
             self.profiler.snapshot(),
-            self.acceptance_tracker.snapshot(self.config.q_candidates),
+            self.acceptance_tracker.snapshot(q_candidates),
             allow_ordinary=True,
+            draft_load=self.controller.draft_load_tracker.snapshot(),
+            tp_snapshot=(
+                self.tp_monitor.snapshot() if self.tp_monitor is not None else None
+            ),
         )
+
+    def record_decision(self, decision: SpecStreamDecision | None) -> None:
+        if decision is None or self.controller is None:
+            return
+        self.profiler.record_decision(
+            decision,
+            self.controller.draft_load_tracker.snapshot(),
+            (
+                self.tp_monitor.snapshot()
+                if self.tp_monitor is not None
+                else TPStragglerSnapshot()
+            ),
+        )
+
+    def should_sync_tp_profile(self) -> bool:
+        if self.tp_monitor is None or self.tp_size < 2:
+            return False
+        self._tp_sync_counter += 1
+        if self.tp_monitor.snapshot().samples == 0:
+            return True
+        return self._tp_sync_counter % self.config.tp_monitor_interval == 0
+
+    def local_tp_rank_sample(self) -> TPRankSample | None:
+        return self.tp_monitor.local_sample() if self.tp_monitor is not None else None
+
+    def record_tp_rank_samples(self, samples) -> None:
+        if self.tp_monitor is None:
+            return
+        self.tp_monitor.observe(samples)
+        self.profiler.record_tp_snapshot(self.tp_monitor.snapshot())
 
     def record_network_wait(self, elapsed_ms: float) -> None:
         self.profiler.record_network_wait(elapsed_ms)
+
+    def prepare_initial_grants(self, batch, desired_q: int):
+        if self.grant_runtime is None:
+            return []
+        reqs = [
+            req for req in batch.reqs if not str(req.rid).startswith("HEALTH_CHECK")
+        ]
+        return self._register_grant_reqs(reqs, desired_q)
+
+    def prepare_retry_grants(self, reqs, desired_q: int):
+        if self.grant_runtime is None:
+            return []
+        reqs = [req for req in reqs if not str(req.rid).startswith("HEALTH_CHECK")]
+        return self._register_grant_reqs(reqs, desired_q)
+
+    def _register_grant_reqs(self, reqs, desired_q: int):
+        if not reqs:
+            return []
+        batch_size = len(reqs)
+        max_context = max(
+            len(getattr(req, "origin_input_ids", ()) or ())
+            + len(getattr(req, "output_ids", ()) or ())
+            for req in reqs
+        )
+        ctx_bucket = context_bucket(max_context)
+        target_shape = f"verify_bs{batch_size}_q{int(desired_q)}_ctx{ctx_bucket}"
+        predicted_slack_us = self.slack_profiler.snapshot(
+            "target_forward"
+        ).predicted_slack_us
+        keys = []
+        for req in reqs:
+            key = (str(req.rid), int(req.spec_cnt))
+            keys.append(key)
+            self.grant_runtime.register_round(
+                request_id=key[0],
+                spec_cnt=key[1],
+                desired_q=int(desired_q),
+                target_shape=target_shape,
+                draft_bs=batch_size,
+                draft_ctx_bucket=ctx_bucket,
+                predicted_slack_us=predicted_slack_us,
+            )
+        messages = self.grant_runtime.initial_grants(keys)
+        for message in messages:
+            self.profiler.record_grant(message, target_phase="target_forward")
+        if not messages:
+            for key in keys:
+                state = self.grant_runtime.state_for(*key)
+                if state is not None and state.last_decision is not None:
+                    self.profiler.record_grant_decision(
+                        state.last_decision, target_phase="target_forward"
+                    )
+                    break
+        return messages
+
+    def waiting_grants(self, keys, *, deadline_us: int):
+        if self.grant_runtime is None:
+            return []
+        messages = self.grant_runtime.waiting_grants(
+            list(keys), deadline_us=int(deadline_us)
+        )
+        for message in messages:
+            self.profiler.record_grant(message, target_phase="target_wait")
+        if not messages:
+            for key in keys:
+                state = self.grant_runtime.state_for(*key)
+                if state is not None and state.last_decision is not None:
+                    self.profiler.record_grant_decision(
+                        state.last_decision, target_phase="target_wait"
+                    )
+                    break
+        return messages
+
+    def acknowledge_grant(self, message) -> bool:
+        if self.grant_runtime is None:
+            return False
+        accepted = self.grant_runtime.acknowledge(message)
+        if accepted:
+            state = self.grant_runtime.state_for(
+                str(message.request_id), int(message.spec_cnt or 0)
+            )
+            self.profiler.record_grant_ack(
+                message,
+                wait_ms=(state.last_grant_wait_ms if state is not None else 0.0),
+            )
+            if float(getattr(message, "draft_step_ms", 0.0) or 0.0) > 0:
+                self.slack_profiler.record_draft_step(message.draft_step_ms)
+        return accepted
+
+    def pause_grants(self, keys):
+        if self.grant_runtime is None:
+            return []
+        return self.grant_runtime.pause_messages(list(keys))
 
     def record_draft_result(
         self,
         *,
         elapsed_ms: float,
+        rtt_ms: float | None = None,
         timeout_ms: float,
         missing_count: int,
         total_count: int,
@@ -928,10 +1696,20 @@ class SpecStreamTargetRuntime:
         if self.controller is not None:
             self.controller.record_draft_result(
                 elapsed_ms=elapsed_ms,
+                rtt_ms=rtt_ms,
                 timeout_ms=timeout_ms,
                 missing_count=missing_count,
                 total_count=total_count,
             )
+            self.profiler.record_draft_load(
+                self.controller.draft_load_tracker.snapshot()
+            )
+
+    def record_draft_reject(self) -> None:
+        if self.controller is None:
+            return
+        self.controller.record_draft_reject()
+        self.profiler.record_draft_load(self.controller.draft_load_tracker.snapshot())
 
     def release_request(self, rid: str) -> None:
         # The scheduler normally calls prepare_request_release() before its
@@ -941,6 +1719,8 @@ class SpecStreamTargetRuntime:
         self.verifier.discard_layer_prefetch(rid)
         self.states.pop(rid, None)
         self.history_store.release(rid)
+        if self.grant_runtime is not None:
+            self.grant_runtime.release_request(rid)
 
     def clear(self) -> None:
         self._poll_pending_seals(wait=True)

@@ -83,6 +83,12 @@ class SpectreWorker:
         )
 
         self._cached_tree_structures: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+        # Reuse timing events per scheduler worker.  The end event still
+        # preserves Draft/Verify overlap: CPU draft receive runs before the
+        # event is synchronized, while elapsed_time gives a real GPU critical-
+        # path measurement for the co-execution/TP-straggler controller.
+        self._target_forward_start_event = torch.cuda.Event(enable_timing=True)
+        self._target_forward_done_event = torch.cuda.Event(enable_timing=True)
         self.specstream_runtime = None
         if server_args.specstream_enabled or server_args.specstream_profile_only:
             config = SpecStreamConfig.from_server_args(server_args)
@@ -414,19 +420,44 @@ class SpectreWorker:
         )
         assert model_worker_batch.capture_hidden_mode == spec_info.capture_hidden_mode
 
-        started = time.perf_counter()
+        forward_start = self._target_forward_start_event
+        forward_done = self._target_forward_done_event
+        current_stream = torch.cuda.current_stream()
+        forward_start.record(current_stream)
+        host_forward_started = time.perf_counter()
         batch_result = self.target_worker.forward_batch_generation(
             model_worker_batch, is_verify=True
         )
-        if self.specstream_runtime is not None:
-            self.specstream_runtime.record_target_forward(
-                specstream_meta, (time.perf_counter() - started) * 1000
-            )
+        host_forward_ms = (time.perf_counter() - host_forward_started) * 1000
+        forward_done.record(current_stream)
         logits_output, can_run_cuda_graph = (
             batch_result.logits_output,
             batch_result.can_run_cuda_graph,
         )
+        # The Target forward is asynchronous.  Receive the next-round remote
+        # draft while its GPU work is executing, then wait only for this
+        # forward's completion event before CPU/GPU result consumption.  A
+        # device-wide synchronize here destroyed SPECTRE's Draft-Verify overlap
+        # and also waited for unrelated D2H/H2D streams.
+        new_drafts_per_req: dict = {}
+        if recv_draft_fn is not None and not batch.forward_mode.is_idle():
+            batch.spectre_target_forward_done_event = forward_done
+            try:
+                new_drafts_per_req = recv_draft_fn(batch)
+            finally:
+                batch.spectre_target_forward_done_event = None
+            if getattr(batch, "spectre_draft_timeout", False):
+                # The receive deadline already established Drafter overload.
+                # A synchronous retry would add another half-timeout to the
+                # same critical path; subsequent batches enter q=1 backoff
+                # before the controller probes the Drafter again.
+                retry_fn = None
+        forward_done.synchronize()
+        gpu_forward_ms = forward_start.elapsed_time(forward_done)
         if self.specstream_runtime is not None:
+            self.specstream_runtime.record_target_forward(
+                specstream_meta, gpu_forward_ms, enqueue_ms=host_forward_ms
+            )
             self.specstream_runtime.record_logit_margin(
                 specstream_meta, logits_output.next_token_logits
             )
@@ -436,17 +467,6 @@ class SpectreWorker:
                 logits_output.next_token_logits,
                 "SpectreWorker verify logits",
             )
-
-        torch.cuda.synchronize()
-        new_drafts_per_req: dict = {}
-        if recv_draft_fn is not None and not batch.forward_mode.is_idle():
-            new_drafts_per_req = recv_draft_fn(batch)
-            if getattr(batch, "spectre_draft_timeout", False):
-                # The receive deadline already established Drafter overload.
-                # A synchronous retry would add another half-timeout to the
-                # same critical path; subsequent batches enter q=1 backoff
-                # before the controller probes the Drafter again.
-                retry_fn = None
 
         spec_info.hidden_states = logits_output.hidden_states
 
@@ -464,9 +484,7 @@ class SpectreWorker:
             batch,
             res,
             new_drafts_per_req,
-            ordinary_mode=(
-                getattr(batch, "specstream_mode", "parallel") == "ordinary"
-            ),
+            ordinary_mode=(getattr(batch, "specstream_mode", "parallel") == "ordinary"),
             retry_fn=retry_fn,
             retry_fail_ratio=retry_fail_ratio,
             retry_min_count=retry_min_count,

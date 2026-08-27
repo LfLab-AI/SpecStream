@@ -91,7 +91,8 @@ GPU/Triton 专项测试会覆盖 q=1、q=5、BF16/FP16、513 个非整块 Histor
 
 ```bash
 pytest -q -s \
-  python/sglang/test/spectre_specstream/test_triton_tiled_attention.py
+  python/sglang/test/spectre_specstream/test_triton_tiled_attention.py \
+  python/sglang/test/spectre_specstream/test_multi_request_layer_prefetch.py
 ```
 
 然后启动一轮带 shadow 的 B3，仅做正确性，不记录性能：
@@ -117,17 +118,64 @@ CUDA_VISIBLE_DEVICES=1 python -m sglang.launch_server \
   --speculative-num-steps 4 --speculative-eagle-topk 1 \
   --speculative-num-draft-tokens 5 \
   --page-size 1 --attention-backend fa3 \
+  --spectre-fixed-q-mode parallel --spectre-require-draft \
+  --spectre-draft-timeout-action fallback \
+  --spectre-recv-timeout-ms 5000 --spectre-initial-recv-timeout-ms 15000 \
+  --spectre-failure-threshold 3 --spectre-cooldown-rounds 32 \
   --specstream-enabled --no-specstream-reference-attention \
   --specstream-chunk-tokens 2048 \
   --specstream-chunks-per-transfer 4 \
   --specstream-num-buffers 2 \
+  --specstream-layer-prefetch \
   --specstream-active-tail-tokens 512 \
   --specstream-min-history-tokens 8192 \
   --specstream-cpu-memory-gb 128 \
+  --specstream-cohort-enabled \
+  --specstream-max-cohort-size 8 \
+  --specstream-max-cohort-delay-us 200 \
+  --specstream-gpu-reserve-mb 1024 \
   --specstream-profile-path results/profiles/B3_tiled.csv \
   --disable-radix-cache --disable-cuda-graph --disable-overlap-schedule \
   --spectre-zmq-addr 127.0.0.1 --spectre-zmq-port 29000
 ```
+
+这条命令是 parallel 消融配置，而不是 c=16/32 无条件采用的最终配置：`parallel` 负责 Draft/Verify overlap，`layer-prefetch` 负责 layer L+1 H2D 与 layer L Tail/MLP overlap，`cohort-enabled` 负责跨请求 packed DMA 与 batched History kernel。每个并发点必须再运行 ordinary 或 dynamic `(mode,q)`。只有 Accept length 未退化、没有持续 DraftFallback 时，parallel 数字才能进入性能比较；B0 公平基线也必须使用相同 mode、CUDA graph/overlap 开关和 Drafter 配置。
+
+跨层预取必须做开/关消融。两轮仅改变：
+
+```bash
+--specstream-layer-prefetch
+--no-specstream-layer-prefetch
+```
+
+新版 cohort prefetch 不再先做大块同步 CPU pack，而是把 pinned request slabs 直接异步写入下一层 GPU cohort window；steady-state cohort group 达到 32 MiB 后也自动使用 direct async H2D，避免 scheduler 线程重复拷贝整块 KV。若新版仍比关闭预取慢，应保留 `--no-specstream-layer-prefetch` 作为该硬件的最终设置，不能仅凭“理论可重叠”强制开启。
+
+### 6.1 跨层尾部 slot stealing 与 prefetch distance 的边界
+
+新版不再等 layer L 的全部 History group 结束才提交 L+1。当 ring 中某个 slot 已经没有
+layer L 的后续 group 可填时，会立刻把该 slot 交给 L+1；另一个 slot 仍可执行 layer L
+最后一个 History kernel。single request、independent multi-request 和 cohort 三条路径都使用
+同一规则，且不会增加 staging 显存。短 ring 的兜底提交仍在 History 结束处执行，但只补齐
+尚未提交的窗口，不会重复 H2D。
+
+不能在当前“每一层 History 都 offload”的实现里直接套用
+`d = ceil(T_copy / T_compute)` 并跳过 L+1、预取 L+d。原因是中间每一层也有自己的 copy
+需求，单 copy stream 的稳态可行条件至少应同时计入区间内的 copy demand：
+
+```text
+sum(compute cover in d layers) >= sum(copy demand submitted in the same interval)
+```
+
+若每层 `T_copy=2.4 ms`、每层可覆盖计算只有 `0.8 ms`，且 28 层全部 offload，则 copy
+engine 的工作到达速度是服务能力的 3 倍；不存在一个有限 d 能把稳态 copy 全部隐藏。
+3/4 buffer 只能扩大 fill/drain 和短暂抖动的 overlap window，不能把 PCIe 带宽变成 3 倍。
+只有平均 copy demand 小于可覆盖计算（例如仅部分层 offload、压缩 KV 或显著提高 q/accept
+length）后，才应让 IOAwareController 在额外 lookahead slot 容量内选择 d>1。
+
+Target 启动时现在会用预分配 staging 做一次最大 64 MiB 的 pinned H2D CUDA-event
+校准；cost model 使用该带宽，不再把 Python 的 submit-to-consume queue residence 误当成
+`cudaMemcpyAsync` 时长。profile 新增 `h2d_timing_source` 和 `copy_floor_ms`。若复用旧 CSV
+路径但列定义已经变化，新行会自动写入 `*.schema-<hash>.csv`，避免列整体错位。
 
 ## 7. 修正后的固定长度对照
 
@@ -186,6 +234,18 @@ PY
 ```
 
 最终用 Nsight Systems 验证 copy stream 和 main compute stream 的时间线，而不能只依赖 Python `perf_counter`。现有 CSV 的 per-chunk `h2d_ms/stream_attn_ms` 是 host enqueue 区间，异步 CUDA 下不能作为精确 kernel 时间；端到端吞吐和 Nsight timeline 才是性能结论依据。
+
+先用下面两条命令排除“名义 output=1024、实际 ShareGPT override=256”和不公平 B0：
+
+```bash
+python scripts/specstream/summarize_benchmarks.py results/bench/*.jsonl
+python scripts/specstream/summarize_specstream_profile.py \
+  --h2d-gbps <启动日志中的校准值> results/profiles/*.csv
+```
+
+第一条会同时打印 `requested_output_len`、`mean_actual_output_len`、CUDA graph/overlap
+开关、prefetch/cohort 配置和错误数；第二条会打印 schema mismatch 行数、每 accepted token
+的 H2D MiB 和 copy-engine 理论下界。
 
 ## 9. 下一轮 GO/NO-GO 条件
 

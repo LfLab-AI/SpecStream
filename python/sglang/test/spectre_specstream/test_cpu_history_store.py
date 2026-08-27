@@ -43,6 +43,40 @@ def test_layer_major_chunks_are_contiguous_and_releasable():
     assert store.bytes_used == store.bytes_reserved == 0
 
 
+def test_failed_seal_rolls_back_new_cpu_slabs():
+    class _FailingPool(_Pool):
+        def get_key_buffer(self, layer):
+            if layer == 1:
+                raise RuntimeError("injected gather failure")
+            return super().get_key_buffer(layer)
+
+        def get_value_buffer(self, layer):
+            if layer == 1:
+                raise RuntimeError("injected gather failure")
+            return super().get_value_buffer(layer)
+
+    pool = _FailingPool()
+    pool.key[1] = pool.key[0]
+    pool.value[1] = pool.value[0]
+    store = CPUHistoryStore(
+        max_memory_bytes=1 << 20,
+        chunk_tokens=4,
+        layer_ids=(0, 1),
+        kv_heads=2,
+        head_dim=4,
+        dtype=torch.float32,
+        device="cpu",
+    )
+
+    with pytest.raises(RuntimeError, match="injected gather failure"):
+        store.seal_slots_async(
+            rid="r", abs_start=0, slots=torch.arange(4), token_to_kv_pool=pool
+        )
+
+    assert store.request_block_ids("r") == []
+    assert store.bytes_used == store.bytes_reserved == 0
+
+
 class _Event:
     def __init__(self):
         self.ready = False

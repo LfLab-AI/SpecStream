@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import time
 
 import torch
@@ -139,6 +140,53 @@ class StagingWindowPool:
         for slot in range(self.num_buffers):
             self._ensure_host_shape(slot, shape, dtype)
             self._ensure_valid_shape(slot, int(shape[0]))
+
+    def calibrate_h2d_gbps(
+        self, *, sample_bytes: int = 64 * 1024 * 1024, repeats: int = 4
+    ) -> float:
+        """Measure this process' pinned H2D bandwidth before serving starts.
+
+        Python submit-to-consume intervals include queue residence and async
+        kernel enqueue time; treating them as memcpy duration corrupts the I/O
+        cost model.  This bounded startup calibration uses CUDA events on the
+        actual SpecStream copy stream and never runs on the request path.
+        """
+
+        if self.copy_stream is None or repeats < 1:
+            return 0.0
+        destination = next(
+            (buffer for buffer in self._buffers if buffer is not None), None
+        )
+        if destination is None or destination.numel() == 0:
+            return 0.0
+        element_size = int(destination.element_size())
+        elements = min(
+            int(destination.numel()),
+            max(1, int(sample_bytes) // max(element_size, 1)),
+        )
+        try:
+            source = torch.empty(
+                elements,
+                dtype=destination.dtype,
+                device="cpu",
+                pin_memory=True,
+            )
+        except RuntimeError:
+            return 0.0
+        target = destination.view(-1)[:elements]
+        started = torch.cuda.Event(enable_timing=True)
+        finished = torch.cuda.Event(enable_timing=True)
+        with torch.cuda.stream(self.copy_stream):
+            target.copy_(source, non_blocking=True)
+            started.record(self.copy_stream)
+            for _ in range(int(repeats)):
+                target.copy_(source, non_blocking=True)
+            finished.record(self.copy_stream)
+        finished.synchronize()
+        elapsed_ms = float(started.elapsed_time(finished)) / int(repeats)
+        if elapsed_ms <= 0 or not math.isfinite(elapsed_ms):
+            return 0.0
+        return elements * element_size / elapsed_ms / 1e6
 
     def submit(self, source: torch.Tensor, slot: int) -> StagingTransfer:
         if source.device.type != "cpu":
@@ -297,6 +345,106 @@ class StagingWindowPool:
             slot=slot,
             tensor=destination,
             nbytes=destination.nbytes + valid_device.nbytes,
+            submitted_ns=submitted_ns,
+            source_count=source_count,
+            valid_tokens=valid_device,
+            valid_lengths=tuple(valid_lengths),
+        )
+
+    def submit_cohort_groups_direct_async(
+        self,
+        source_groups: (
+            list[list[torch.Tensor] | tuple[torch.Tensor, ...]]
+            | tuple[list[torch.Tensor] | tuple[torch.Tensor, ...], ...]
+        ),
+        slot: int,
+    ) -> StagingTransfer:
+        """Prefetch a cohort without synchronously repacking it on the CPU.
+
+        ``submit_cohort_groups`` is the steady-state packed-DMA path.  Calling
+        it at the end of layer L, however, performs a potentially hundreds-of-
+        MiB host-to-host pack before Python can enqueue L's Tail/MLP.  At high
+        concurrency that CPU work becomes a new critical path and defeats
+        cross-layer overlap.
+
+        This prefetch-only path writes the request-private pinned slabs
+        directly into slices of one cohort staging tensor on the copy stream.
+        It uses more DMA descriptors, but no bulk synchronous CPU copy.  The
+        same ready/free event and the same batched cohort kernel consume the
+        resulting window in layer L+1.
+        """
+
+        if not source_groups or not any(source_groups):
+            raise ValueError("SpecStream cohort requires at least one source")
+        first = next(group[0] for group in source_groups if group)
+        if first.device.type != "cpu" or not first.is_contiguous():
+            raise ValueError("SpecStream cohort sources must be contiguous CPU tensors")
+        trailing_shape = tuple(first.shape[1:])
+        valid_lengths: list[int] = []
+        source_count = 0
+        total_bytes = 0
+        for group in source_groups:
+            length = 0
+            for source in group:
+                if source.device.type != "cpu" or not source.is_contiguous():
+                    raise ValueError(
+                        "SpecStream cohort sources must be contiguous CPU tensors"
+                    )
+                if (
+                    source.dtype != first.dtype
+                    or tuple(source.shape[1:]) != trailing_shape
+                ):
+                    raise ValueError("cohort chunks must have one KV geometry")
+                length += int(source.shape[0])
+                total_bytes += int(source.nbytes)
+                source_count += 1
+            valid_lengths.append(length)
+
+        max_tokens = max(valid_lengths)
+        destination = self._ensure_shape(
+            slot,
+            (len(source_groups), max_tokens, *trailing_shape),
+            first.dtype,
+        )
+        # Only the tiny valid-length host buffer is reused.  Make sure its
+        # previous async copy has completed; no large cohort pack buffer is
+        # touched by this path.
+        self._wait_host_slot_writable(slot)
+        valid_host, valid_device = self._ensure_valid_shape(slot, len(source_groups))
+        for index, length in enumerate(valid_lengths):
+            valid_host[index] = length
+
+        submitted_ns = time.perf_counter_ns()
+
+        def copy_sources() -> None:
+            for item_index, group in enumerate(source_groups):
+                cursor = 0
+                for source in group:
+                    length = int(source.shape[0])
+                    destination[item_index, cursor : cursor + length].copy_(
+                        source,
+                        non_blocking=bool(source.is_pinned()),
+                    )
+                    cursor += length
+            valid_device.copy_(
+                valid_host,
+                non_blocking=bool(valid_host.is_pinned()),
+            )
+
+        if self.copy_stream is None:
+            copy_sources()
+        else:
+            with torch.cuda.stream(self.copy_stream):
+                if self._has_free_event[slot]:
+                    self.copy_stream.wait_event(self._free_events[slot])
+                copy_sources()
+                self._ready_events[slot].record(self.copy_stream)
+                self._has_ready_event[slot] = True
+
+        return StagingTransfer(
+            slot=slot,
+            tensor=destination,
+            nbytes=total_bytes + int(valid_device.nbytes),
             submitted_ns=submitted_ns,
             source_count=source_count,
             valid_tokens=valid_device,

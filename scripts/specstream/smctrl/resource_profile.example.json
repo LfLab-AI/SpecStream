@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "gpu": "A100-SXM4-40GB",
+  "draft_model": "Qwen2.5-0.5B-Instruct",
+  "target_model": "Qwen2.5-7B-Instruct",
+  "total_tpcs": 54,
+  "entries": [
+    {
+      "target_shape": "verify_bs8_q5_ctx16k",
+      "draft_bs": 8,
+      "draft_ctx_bucket": "16k",
+      "draft_tpcs": 4,
+      "draft_step_ms": 1.23,
+      "target_slowdown": 0.028,
+      "target_baseline_ms": 8.75,
+      "repetitions": 5
+    }
+  ]
+}

@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <iostream>
 #include <map>
 #include <mutex>
@@ -19,7 +20,17 @@
 namespace py = pybind11;
 
 namespace spectre {
-enum class SpectreAction { DRAFT = 0, FINISH = 1, ABORT = 2, REJECT = 3 };
+constexpr int kProtocolSchemaVersion = 2;
+
+enum class SpectreAction {
+  DRAFT = 0,
+  FINISH = 1,
+  ABORT = 2,
+  REJECT = 3,
+  GRANT = 4,
+  PAUSE = 5,
+  GRANT_ACK = 6
+};
 
 enum class SpecType { NORMAL = 0, DRAFT_REQUEST = 1, DRAFT_RESPONSE = 2 };
 
@@ -42,7 +53,10 @@ inline std::string to_string(SpectreAction t) {
       {SpectreAction::DRAFT, "draft"},
       {SpectreAction::FINISH, "finish"},
       {SpectreAction::ABORT, "abort"},
-      {SpectreAction::REJECT, "reject"}};
+      {SpectreAction::REJECT, "reject"},
+      {SpectreAction::GRANT, "grant"},
+      {SpectreAction::PAUSE, "pause"},
+      {SpectreAction::GRANT_ACK, "grant_ack"}};
   return m.at(t);
 }
 
@@ -65,6 +79,12 @@ inline SpectreAction str_to_remote_action(const std::string &s) {
     return SpectreAction::ABORT;
   if (s == "reject")
     return SpectreAction::REJECT;
+  if (s == "grant")
+    return SpectreAction::GRANT;
+  if (s == "pause")
+    return SpectreAction::PAUSE;
+  if (s == "grant_ack")
+    return SpectreAction::GRANT_ACK;
   throw std::invalid_argument("Invalid SpectreAction: " + s);
 }
 
@@ -121,10 +141,23 @@ struct SpectreRequest {
   double draft_recv_time = -1.0;
   double draft_send_time = -1.0;
 
+  // SpecStream execution-control plane. Keep these fields appended so a v2
+  // reader can still accept the original 15-field v1 payload.
+  std::optional<int> grant_epoch;
+  std::optional<int> grant_tokens;
+  std::optional<int> tpc_low;
+  std::optional<int> tpc_high;
+  std::optional<int64_t> deadline_us;
+  std::optional<int> placement_id;
+  std::optional<std::string> grant_state;
+  std::optional<double> draft_step_ms;
+
   MSGPACK_DEFINE(request_id, spec_cnt, action, spec_type, draft_token_ids,
                  input_ids, output_ids, num_draft_tokens, sampling_params,
                  grammar, target_send_time, target_recv_time, draft_logprobs,
-                 draft_recv_time, draft_send_time);
+                 draft_recv_time, draft_send_time, grant_epoch, grant_tokens,
+                 tpc_low, tpc_high, deadline_us, placement_id, grant_state,
+                 draft_step_ms);
 };
 
 inline SamplingParams sampling_params_from_py_dict(const py::dict &d) {
@@ -203,6 +236,14 @@ inline SpectreRequest from_py_dict(const py::dict &d) {
     r.draft_recv_time = py::cast<double>(d["draft_recv_time"]);
   if (d.contains("draft_send_time") && !d["draft_send_time"].is_none())
     r.draft_send_time = py::cast<double>(d["draft_send_time"]);
+  assign_optional_from_py_dict(d, "grant_epoch", r.grant_epoch);
+  assign_optional_from_py_dict(d, "grant_tokens", r.grant_tokens);
+  assign_optional_from_py_dict(d, "tpc_low", r.tpc_low);
+  assign_optional_from_py_dict(d, "tpc_high", r.tpc_high);
+  assign_optional_from_py_dict(d, "deadline_us", r.deadline_us);
+  assign_optional_from_py_dict(d, "placement_id", r.placement_id);
+  assign_optional_from_py_dict(d, "grant_state", r.grant_state);
+  assign_optional_from_py_dict(d, "draft_step_ms", r.draft_step_ms);
 
   return r;
 }
@@ -268,6 +309,14 @@ inline py::dict to_py_dict(const SpectreRequest &r) {
   set_if_present("draft_logprobs", r.draft_logprobs);
   d["draft_recv_time"] = r.draft_recv_time;
   d["draft_send_time"] = r.draft_send_time;
+  set_if_present("grant_epoch", r.grant_epoch);
+  set_if_present("grant_tokens", r.grant_tokens);
+  set_if_present("tpc_low", r.tpc_low);
+  set_if_present("tpc_high", r.tpc_high);
+  set_if_present("deadline_us", r.deadline_us);
+  set_if_present("placement_id", r.placement_id);
+  set_if_present("grant_state", r.grant_state);
+  set_if_present("draft_step_ms", r.draft_step_ms);
 
   return d;
 }

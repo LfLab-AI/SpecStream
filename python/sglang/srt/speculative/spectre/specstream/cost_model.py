@@ -31,6 +31,8 @@ class SpecStreamCostProfile:
     draft_per_token_ms: float = 0.08
     network_ms: float = 0.05
     repair_ms: float = 0.20
+    target_compute_ratio: float = 0.0
+    exposed_copy_ms: float = 0.0
 
 
 @dataclass(frozen=True)

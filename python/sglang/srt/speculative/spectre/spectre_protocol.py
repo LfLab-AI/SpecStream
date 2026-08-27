@@ -45,12 +45,18 @@ class SpectreAction(Enum):
     finish: when req is finished in target (T->D)
     abort: when req is aborted in target (T->D)
     reject: when draft is high overhead (D->T)
+    grant: one Target-authorized Draft token step (T->D)
+    pause: revoke the active Draft execution grant (T->D)
+    grant_ack: one granted token step completed (D->T)
     """
 
     DRAFT = "draft"
     FINISH = "finish"
     ABORT = "abort"
     REJECT = "reject"
+    GRANT = "grant"
+    PAUSE = "pause"
+    GRANT_ACK = "grant_ack"
 
 
 class SpecType(Enum):
@@ -85,6 +91,18 @@ class SpectreRequest:
     draft_logprobs: Optional[List[float]] = None
     draft_recv_time: float = -1.0
     draft_send_time: float = -1.0
+
+    # SpecStream execution-control plane.  These fields are deliberately
+    # separate from ``num_draft_tokens``, which remains the desired SPECTRE
+    # horizon rather than permission to launch CUDA work.
+    grant_epoch: Optional[int] = None
+    grant_tokens: Optional[int] = None
+    tpc_low: Optional[int] = None
+    tpc_high: Optional[int] = None
+    deadline_us: Optional[int] = None
+    placement_id: Optional[int] = None
+    grant_state: Optional[str] = None
+    draft_step_ms: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         result = {}

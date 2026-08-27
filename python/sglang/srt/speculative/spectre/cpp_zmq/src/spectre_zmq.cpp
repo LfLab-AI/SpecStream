@@ -12,6 +12,8 @@ namespace py = pybind11;
 
 PYBIND11_MODULE(spectre_zmq, m) {
   m.def("set_spectre_log_level", &spectre_set_log_level);
+  m.def("protocol_schema_version",
+        []() { return spectre::kProtocolSchemaVersion; });
 
   py::class_<DealerEndpoint>(m, "DealerEndpoint")
       .def(py::init<const std::string &, const std::string &, bool>())

@@ -75,3 +75,37 @@ def test_cohort_group_submit_uses_one_packed_window_and_reuses_host_storage():
     assert second.tensor.shape == (2, 2, 2, 2)
     assert second.valid_lengths == (2, 0)
     assert staging.allocated_host_bytes == 2 * 2 * 8 * 2 * 2 * 4
+
+
+def test_direct_async_cohort_prefetch_skips_large_host_pack_buffer():
+    staging = StagingWindowPool(2, "cpu")
+    staging.reserve((2, 8, 2, 2), torch.float32)
+    groups = [
+        [torch.full((3, 2, 2), 1.0), torch.full((2, 2, 2), 2.0)],
+        [torch.full((4, 2, 2), 3.0)],
+    ]
+
+    transfer = staging.submit_cohort_groups_direct_async(groups, 0)
+    actual = staging.wait_ready(transfer)
+
+    assert staging._host_buffers[0] is None
+    assert transfer.source_count == 3
+    assert transfer.valid_lengths == (5, 4)
+    assert (
+        transfer.nbytes
+        == sum(source.nbytes for group in groups for source in group)
+        + transfer.valid_tokens.nbytes
+    )
+    torch.testing.assert_close(actual[0, :3], groups[0][0])
+    torch.testing.assert_close(actual[0, 3:5], groups[0][1])
+    torch.testing.assert_close(actual[1, :4], groups[1][0])
+    torch.testing.assert_close(
+        transfer.valid_tokens, torch.tensor([5, 4], dtype=torch.int32)
+    )
+
+
+def test_h2d_calibration_is_disabled_for_cpu_staging():
+    staging = StagingWindowPool(2, "cpu")
+    staging.reserve((8, 2, 1, 2), torch.float32)
+
+    assert staging.calibrate_h2d_gbps() == 0.0
