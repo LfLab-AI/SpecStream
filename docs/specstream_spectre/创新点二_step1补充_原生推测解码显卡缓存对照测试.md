@@ -99,12 +99,15 @@ CUDA_VISIBLE_DEVICES=1 python -m sglang.launch_server \
 --specstream-profile-only \
 --specstream-dynamic-q \
 --specstream-q-candidates 1,2,4,6,8 \
---specstream-coexec-enabled \
---specstream-coexec-require-mps \
+--specstream-smctrl-enabled \
+--specstream-grant-token-quantum 1 \
+--specstream-coexec-target-slowdown-budget 0.05 \
+--specstream-coexec-guard-us 200 \
+--specstream-coexec-resource-profile-path /实测/resource_profile.json \
 --specstream-profile-path profiles/innovation2_native_gpu_kv.csv
 ```
 
-目的：只开启动态 q、共执行和反压。由于没有 `--specstream-enabled`，Target KV 不会离开 GPU。
+目的：只开启动态 q 与 Target-priority one-token grant/TPC gating。由于没有 `--specstream-enabled`，Target KV 不会离开 GPU。旧的 `--specstream-coexec-enabled` 与 MPS 百分比策略不得再用于本组。
 
 完整 Target、Draft、MPS 和 benchmark 命令见：
 

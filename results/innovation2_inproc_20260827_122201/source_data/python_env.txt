@@ -1,7 +1,0 @@
-python_executable = /root/miniconda3/envs/spectre/bin/python
-python_version = 3.12.13 | packaged by Anaconda, Inc. | (main, Jul  9 2026, 14:38:16) [GCC 14.3.0]
-platform = Linux-4.19.90-2107.6.0.0192.8.oe1.bclinux.x86_64-x86_64-with-glibc2.35
-torch = 2.9.1+cu128
-torch_cuda = 12.8
-cuda_available = True
-sglang = /root/lifei/SpecStream/python/sglang/__init__.py

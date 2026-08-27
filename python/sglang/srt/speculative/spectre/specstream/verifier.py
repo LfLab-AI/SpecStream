@@ -32,12 +32,6 @@ from sglang.srt.speculative.spectre.specstream.diagnostics import (
 )
 from sglang.srt.speculative.spectre.specstream.gpu_grant_controller import (
     GpuGrantController,
-    GrantState,
-)
-from sglang.srt.speculative.spectre.specstream.sm_controller import SMController
-from sglang.srt.speculative.spectre.specstream.tpc_partition import (
-    ComplementaryTPCPartition,
-    build_complementary_tpc_partition,
 )
 from sglang.srt.speculative.spectre.specstream.mps_env import read_mps_environment
 from sglang.srt.speculative.spectre.specstream.multi_gpu_tp_policy import (
@@ -1078,45 +1072,6 @@ class SpecStreamTargetRuntime:
         self._pending_seals: dict[str, _PendingSeal] = {}
         self._round_id = 0
         self._tp_sync_counter = 0
-        self.target_smctrl = None
-        self.target_total_tpcs = 0
-        self._last_target_tpc_range: tuple[int, int] | None = None
-        self._active_target_partition: ComplementaryTPCPartition | None = None
-
-        if (
-            config.smctrl_enabled
-            and config.smctrl_complementary_partition
-            and not config.smctrl_draft_only_parallel
-        ):
-            self.target_smctrl = SMController(
-                config.smctrl_library or None,
-                # Do not derive the CUDA index from model_runner.device:
-                # ModelRunner stores server_args.device here, which is the
-                # string "cuda", not torch.device("cuda:N").
-                #
-                # SMController already defaults to
-                # torch.cuda.current_device(), which is exactly what we want
-                # after CUDA_VISIBLE_DEVICES remapping.
-                mask_scope="global",
-            )
-            self.target_total_tpcs = int(self.target_smctrl.total_tpcs)
-            if self.target_total_tpcs > 64:
-                raise RuntimeError(
-                    "SpecStream complementary process-global TPC partition "
-                    "currently supports at most 64 TPCs"
-                )
-            self._set_target_tpc_range(0, self.target_total_tpcs)
-            logger.info(
-                "SpecStream complementary Target TPC controller ready: "
-                "full=[0,%d)",
-                self.target_total_tpcs,
-            )
-
-        if config.smctrl_enabled and config.smctrl_draft_only_parallel:
-            logger.info(
-                "SpecStream draft-only true parallel: Target TPC mask is DISABLED; "
-                "Target keeps all visible TPCs while Drafter alone is TPC-limited"
-            )
 
         self.mps_environment = read_mps_environment()
         if config.profile_only:
@@ -1290,93 +1245,6 @@ class SpecStreamTargetRuntime:
             profiler=self.profiler,
             diagnostics=self.diagnostics,
         )
-
-    def _set_target_tpc_range(self, low: int, high: int) -> None:
-        # Set the Target process-wide TPC mask and cache redundant switches.
-        if self.target_smctrl is None:
-            return
-        requested = (int(low), int(high))
-        if requested == self._last_target_tpc_range:
-            return
-        stream = torch.cuda.current_stream()
-        self.target_smctrl.set_stream_mask(stream, *requested)
-        self._last_target_tpc_range = requested
-
-    def _active_slack_fill_draft_ranges(self, batch) -> tuple[tuple[int, int], ...]:
-        # Read the same outstanding SLACK_FILL grants that the Drafter obeys.
-        if self.grant_runtime is None:
-            return ()
-        ranges = []
-        for req in batch.reqs:
-            if str(getattr(req, "rid", "")).startswith("HEALTH_CHECK"):
-                continue
-            state = self.grant_runtime.state_for(
-                str(req.rid), int(getattr(req, "spec_cnt", 0) or 0)
-            )
-            if (
-                state is None
-                or state.outstanding_epoch is None
-                or state.last_decision is None
-                or state.last_decision.state is not GrantState.SLACK_FILL
-            ):
-                continue
-            ranges.append(
-                (
-                    int(state.last_decision.tpc_low),
-                    int(state.last_decision.tpc_high),
-                )
-            )
-        return tuple(ranges)
-
-    def begin_target_partition(self, batch, meta=None) -> bool:
-        # During parallel SLACK_FILL: Draft=[0,k), Target=[k,N).
-        if self.config.smctrl_draft_only_parallel:
-            # Mainline policy: Target remains unrestricted. Only Drafter is
-            # TPC-limited, while continuous SLACK_FILL still overlaps Draft
-            # tokens with the asynchronous Target forward.
-            return False
-        if self.target_smctrl is None:
-            return False
-        if getattr(batch, "specstream_mode", "parallel") != "parallel":
-            if meta is not None:
-                self.profiler.record_target_partition(
-                    meta.round_id, 0, self.target_total_tpcs
-                )
-            return False
-
-        partition = build_complementary_tpc_partition(
-            self.target_total_tpcs,
-            self._active_slack_fill_draft_ranges(batch),
-        )
-        if partition is None:
-            if meta is not None:
-                self.profiler.record_target_partition(
-                    meta.round_id, 0, self.target_total_tpcs
-                )
-            return False
-
-        self._set_target_tpc_range(partition.target_low, partition.target_high)
-        self._active_target_partition = partition
-        if meta is not None:
-            self.profiler.record_target_partition(
-                meta.round_id, partition.target_low, partition.target_high
-            )
-        logger.debug(
-            "[SpecStream][TPC] complementary overlap Draft=[%d,%d) "
-            "Target=[%d,%d)",
-            partition.draft_low,
-            partition.draft_high,
-            partition.target_low,
-            partition.target_high,
-        )
-        return True
-
-    def end_target_partition(self) -> None:
-        # Restore Target=[0,N) only after the asynchronous Target forward ends.
-        if self.target_smctrl is None or self._active_target_partition is None:
-            return
-        self._set_target_tpc_range(0, self.target_total_tpcs)
-        self._active_target_partition = None
 
     def batch_requires_streaming(self, batch) -> bool:
         self._poll_pending_seals()
@@ -1775,16 +1643,6 @@ class SpecStreamTargetRuntime:
                         state.last_decision, target_phase="target_forward"
                     )
                     break
-        return messages
-
-    def overlap_grants(self, keys, *, now_us: int | None = None):
-        if self.grant_runtime is None:
-            return []
-        messages = self.grant_runtime.overlap_grants(
-            list(keys), now_us=now_us
-        )
-        for message in messages:
-            self.profiler.record_grant(message, target_phase="target_forward")
         return messages
 
     def waiting_grants(self, keys, *, deadline_us: int):

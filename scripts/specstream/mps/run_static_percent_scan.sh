@@ -10,6 +10,8 @@ QUOTA_PAIRS="${SPECSTREAM_QUOTA_PAIRS:-90:10 80:20 70:30 60:40}"
 RESULT_ROOT="${SPECSTREAM_RESULT_ROOT:-results/specstream_mps_scan}"
 READY_CMD="${SPECSTREAM_TARGET_READY_CMD:-curl -fsS http://127.0.0.1:30000/health}"
 READY_TIMEOUT_S="${SPECSTREAM_READY_TIMEOUT_S:-180}"
+DRAFT_READY_CMD="${SPECSTREAM_DRAFT_READY_CMD:-}"
+DRAFT_WARMUP_S="${SPECSTREAM_DRAFT_WARMUP_S:-5}"
 export CUDA_MPS_PIPE_DIRECTORY="${CUDA_MPS_PIPE_DIRECTORY:-/tmp/specstream-mps-${USER}}"
 export CUDA_MPS_LOG_DIRECTORY="${CUDA_MPS_LOG_DIRECTORY:-/tmp/specstream-mps-log-${USER}}"
 
@@ -71,6 +73,23 @@ for pair in ${QUOTA_PAIRS}; do
     bash -lc "${SPECSTREAM_DRAFT_CMD}" >"${run_dir}/draft.log" 2>&1 &
   draft_pid=$!
 
+  if [[ -n "${DRAFT_READY_CMD}" ]]; then
+    deadline=$((SECONDS + READY_TIMEOUT_S))
+    until bash -lc "${DRAFT_READY_CMD}" >/dev/null 2>&1; do
+      if ! kill -0 "${draft_pid}" 2>/dev/null; then
+        printf 'Draft exited before readiness; see %s\n' "${run_dir}/draft.log" >&2
+        exit 1
+      fi
+      if (( SECONDS >= deadline )); then
+        printf 'Draft readiness timed out; see %s\n' "${run_dir}/draft.log" >&2
+        exit 1
+      fi
+      sleep 1
+    done
+  else
+    sleep "${DRAFT_WARMUP_S}"
+  fi
+
   SPECSTREAM_MPS_SCAN_TAG="${tag}" \
   SPECSTREAM_MPS_SCAN_OUTPUT="${run_dir}" \
     bash -lc "${SPECSTREAM_BENCH_CMD}" >"${run_dir}/benchmark.log" 2>&1
@@ -80,4 +99,3 @@ done
 
 trap - EXIT INT TERM
 printf 'Static MPS scan completed: %s\n' "${RESULT_ROOT}"
-

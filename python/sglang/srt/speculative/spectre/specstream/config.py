@@ -68,8 +68,6 @@ class SpecStreamConfig:
     smctrl_mask_scope: str = "stream"
     smctrl_calibration_tpcs: int = 0
     smctrl_calibration_allow_overlap: bool = False
-    smctrl_complementary_partition: bool = False
-    smctrl_draft_only_parallel: bool = False
     tp_straggler_control: bool = False
     colocated_tp_rank: int = 0
     tp_straggler_budget_ms: float = 1.0
@@ -130,27 +128,6 @@ class SpecStreamConfig:
             raise ValueError("specstream_smctrl_calibration_tpcs cannot be negative")
         if self.smctrl_mask_scope not in {"stream", "global"}:
             raise ValueError("specstream_smctrl_mask_scope must be stream or global")
-        if self.smctrl_complementary_partition and not self.smctrl_enabled:
-            raise ValueError(
-                "complementary TPC partition requires --specstream-smctrl-enabled"
-            )
-        if (
-            self.smctrl_complementary_partition
-            and self.smctrl_mask_scope != "global"
-        ):
-            raise ValueError(
-                "complementary TPC partition requires "
-                "--specstream-smctrl-mask-scope global"
-            )
-        if self.smctrl_draft_only_parallel and not self.smctrl_enabled:
-            raise ValueError(
-                "draft-only parallel mode requires --specstream-smctrl-enabled"
-            )
-        if self.smctrl_draft_only_parallel and self.smctrl_complementary_partition:
-            raise ValueError(
-                "--specstream-smctrl-draft-only-parallel and "
-                "--specstream-smctrl-complementary-partition are mutually exclusive"
-            )
         if self.smctrl_calibration_allow_overlap and self.smctrl_calibration_tpcs < 1:
             raise ValueError(
                 "calibration overlap requires --specstream-smctrl-calibration-tpcs"
@@ -271,12 +248,6 @@ class SpecStreamConfig:
             smctrl_calibration_tpcs=int(server_args.specstream_smctrl_calibration_tpcs),
             smctrl_calibration_allow_overlap=bool(
                 server_args.specstream_smctrl_calibration_allow_overlap
-            ),
-            smctrl_complementary_partition=bool(
-                server_args.specstream_smctrl_complementary_partition
-            ),
-            smctrl_draft_only_parallel=bool(
-                server_args.specstream_smctrl_draft_only_parallel
             ),
             tp_straggler_control=bool(server_args.specstream_tp_straggler_control),
             colocated_tp_rank=int(server_args.specstream_colocated_tp_rank),

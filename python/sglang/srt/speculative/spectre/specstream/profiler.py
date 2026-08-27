@@ -78,8 +78,6 @@ class SpecStreamProfileRow:
     draft_step_ms: float = 0.0
     draft_tpc_low: int = -1
     draft_tpc_high: int = -1
-    target_tpc_low: int = -1
-    target_tpc_high: int = -1
     mps_active_thread_percentage: int = 0
     mps_client_priority: int = -1
     mps_sm_partition: str = ""
@@ -253,15 +251,6 @@ class SpecStreamProfiler:
                 setattr(row, key, value)
         else:
             self._pending_grant.update(values)
-
-    def record_target_partition(
-        self, round_id: int, tpc_low: int, tpc_high: int
-    ) -> None:
-        row = self._active.get(int(round_id))
-        if row is None:
-            return
-        row.target_tpc_low = int(tpc_low)
-        row.target_tpc_high = int(tpc_high)
 
     def record_h2d(
         self, round_id: int, nbytes: int, elapsed_ms: float, cohort_size: int = 1
