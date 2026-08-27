@@ -46,6 +46,10 @@ class GenerationBatchResult:
     # relay path: forward stream -> next step forward
     next_draft_input: Optional[EagleDraftInput] = None
 
+    # In-process STANDALONE reconciliation consumes this on GPU before the
+    # ordinary asynchronous CPU copy. It intentionally remains device-local.
+    specstream_accept_indices: Optional[torch.Tensor] = None
+
     # metrics
     expert_distribution_metrics: Optional[ExpertDistributionMetrics] = None
 

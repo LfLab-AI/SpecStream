@@ -582,6 +582,15 @@ class ServerArgs:
     specstream_shadow_attention: bool = False
     specstream_strict_invariants: bool = True
 
+    # SpecStream innovation 2: in-process STANDALONE Draft-ahead (no TPC in Phase A)
+    specstream_inproc_enabled: bool = False
+    specstream_inproc_mode: Literal["serial", "ahead-free", "auto"] = "ahead-free"
+    specstream_inproc_ahead_depth: int = 4
+    specstream_inproc_min_reuse_ratio: float = 0.25
+    specstream_inproc_target_slowdown_budget: float = 0.10
+    specstream_inproc_profile_path: str = "specstream_inproc_profile.jsonl"
+    specstream_inproc_profile_interval: int = 128
+
     # Expert parallelism
     ep_size: int = 1
     moe_a2a_backend: Literal[
@@ -3138,6 +3147,72 @@ class ServerArgs:
                     "then Drafter, and run the documented explicit smoke test."
                 )
 
+        if self.specstream_inproc_enabled:
+            if self.speculative_algorithm != "STANDALONE":
+                raise ValueError(
+                    "--specstream-inproc-enabled requires "
+                    "--speculative-algorithm STANDALONE"
+                )
+            if self.device != "cuda":
+                raise ValueError("SpecStream in-process Phase A requires CUDA")
+            if self.tp_size != 1 or self.dp_size != 1:
+                raise ValueError(
+                    "SpecStream in-process Phase A is the single-GPU path and "
+                    "requires --tp-size 1 and --dp-size 1"
+                )
+            if self.page_size != 1:
+                raise ValueError("SpecStream in-process Phase A requires --page-size 1")
+            if self.speculative_eagle_topk != 1:
+                raise ValueError(
+                    "SpecStream in-process Phase A requires "
+                    "--speculative-eagle-topk 1"
+                )
+            if self.speculative_num_steps != 4:
+                raise ValueError(
+                    "SpecStream in-process Phase A fixes q=4 and therefore "
+                    "requires --speculative-num-steps 4"
+                )
+            if self.speculative_num_draft_tokens != 5:
+                raise ValueError(
+                    "SpecStream in-process q=4 requires the carried token plus "
+                    "four candidates: --speculative-num-draft-tokens 5"
+                )
+            if self.speculative_token_map is not None:
+                raise ValueError(
+                    "SpecStream in-process Phase A does not support a speculative token map"
+                )
+            if self.specstream_inproc_mode not in ("serial", "ahead-free", "auto"):
+                raise ValueError(
+                    "--specstream-inproc-mode must be serial, ahead-free, or auto"
+                )
+            if self.specstream_inproc_ahead_depth not in (1, 2, 4):
+                raise ValueError(
+                    "--specstream-inproc-ahead-depth must be one of 1, 2, or 4"
+                )
+            if not 0 <= self.specstream_inproc_min_reuse_ratio <= 1:
+                raise ValueError(
+                    "--specstream-inproc-min-reuse-ratio must be in [0, 1]"
+                )
+            if not 0 <= self.specstream_inproc_target_slowdown_budget <= 1:
+                raise ValueError(
+                    "--specstream-inproc-target-slowdown-budget must be in [0, 1]"
+                )
+            if self.specstream_inproc_profile_interval <= 0:
+                raise ValueError(
+                    "--specstream-inproc-profile-interval must be positive"
+                )
+            if self.specstream_smctrl_enabled or self.specstream_coexec_enabled:
+                raise ValueError(
+                    "The in-process Phase-A path is intentionally no-TPC and "
+                    "cannot be combined with the remote SPECTRE co-execution flags"
+                )
+            if not envs.SGLANG_ENABLE_SPEC_V2.get():
+                envs.SGLANG_ENABLE_SPEC_V2.set(True)
+                logger.warning(
+                    "Spec v2 was enabled automatically for SpecStream "
+                    "in-process STANDALONE Draft-ahead."
+                )
+
         if (
             self.specstream_enabled
             or self.specstream_profile_only
@@ -5622,6 +5697,56 @@ class ServerArgs:
             action=argparse.BooleanOptionalAction,
             default=ServerArgs.specstream_strict_invariants,
             help="Fail fast on Target tiered-KV state invariant violations.",
+        )
+        parser.add_argument(
+            "--specstream-inproc-enabled",
+            action="store_true",
+            default=ServerArgs.specstream_inproc_enabled,
+            help=(
+                "Enable single-process, same-request optimistic Draft-ahead for "
+                "STANDALONE Spec V2. Phase A uses no MPS, ZMQ, grants, or TPC masks."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-inproc-mode",
+            type=str,
+            choices=("serial", "ahead-free", "auto"),
+            default=ServerArgs.specstream_inproc_mode,
+            help=(
+                "In-process policy: serial is the semantic control, ahead-free "
+                "always overlaps, and auto falls back using observed reuse."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-inproc-ahead-depth",
+            type=int,
+            choices=(1, 2, 4),
+            default=ServerArgs.specstream_inproc_ahead_depth,
+            help="Number of next-round Draft candidate steps launched during Verify.",
+        )
+        parser.add_argument(
+            "--specstream-inproc-min-reuse-ratio",
+            type=float,
+            default=ServerArgs.specstream_inproc_min_reuse_ratio,
+            help="Auto-mode reuse-ratio floor below which execution becomes serial.",
+        )
+        parser.add_argument(
+            "--specstream-inproc-target-slowdown-budget",
+            type=float,
+            default=ServerArgs.specstream_inproc_target_slowdown_budget,
+            help="Reserved auto-mode Target slowdown budget for Phase-B profiling.",
+        )
+        parser.add_argument(
+            "--specstream-inproc-profile-path",
+            type=str,
+            default=ServerArgs.specstream_inproc_profile_path,
+            help="JSONL output for ahead reuse, rollback, repair, and overlap metrics.",
+        )
+        parser.add_argument(
+            "--specstream-inproc-profile-interval",
+            type=int,
+            default=ServerArgs.specstream_inproc_profile_interval,
+            help="Rounds buffered between metric flushes and aggregate log reports.",
         )
 
         # Expert parallelism

@@ -1,0 +1,10 @@
+LICENSE
+README.md
+config.json
+configuration.json
+generation_config.json
+merges.txt
+model.safetensors
+tokenizer.json
+tokenizer_config.json
+vocab.json

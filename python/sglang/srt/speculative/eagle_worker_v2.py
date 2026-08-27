@@ -861,13 +861,19 @@ class EAGLEWorkerV2(BaseSpecWorker):
             verify_done=verify_done,
         )
 
-        return GenerationBatchResult(
+        result = GenerationBatchResult(
             logits_output=logits_output,
             next_token_ids=predict,
             can_run_cuda_graph=can_run_cuda_graph,
             next_draft_input=next_draft_input,
             accept_lens=accept_length,
+            specstream_accept_indices=(
+                accept_index
+                if getattr(self.server_args, "specstream_inproc_enabled", False)
+                else None
+            ),
         )
+        return result
 
     def _compute_spec_v2_logprobs(
         self,
