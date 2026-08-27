@@ -27,14 +27,10 @@ offset-independent QMD/TMD callback backend instead:
 make validate-global TPC_LOW=0 TPC_HIGH=4
 ```
 
-Only after this target passes on the exact GPU/driver combination may a
-dedicated SpecStream process use `--specstream-smctrl-mask-scope global`.
-This scope is process-wide. The remote Drafter may use Draft=[0,k); when
-`--specstream-smctrl-complementary-partition` is enabled, the separate Target
-process temporarily uses the complementary Target=[k,N) mask for the
-overlapping Target forward and restores [0,N) after its completion. Do not
-enable the global backend inside a process that mixes kernels which are meant
-to be masked with kernels which must remain independently unmasked.
+Only after this target passes on the exact GPU/driver combination may the
+Drafter be launched with `--specstream-smctrl-mask-scope global`.  This scope
+is process-wide: it is correct for SpecStream's dedicated Drafter process, but
+must not be enabled in a process that also runs unmasked Target kernels.
 
 The runtime intentionally fails closed if `libsmctrl.so` is absent, the CUDA
 version is unsupported, the requested TPC range is invalid, or validation

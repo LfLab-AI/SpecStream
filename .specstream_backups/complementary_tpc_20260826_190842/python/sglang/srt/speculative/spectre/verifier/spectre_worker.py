@@ -140,27 +140,8 @@ class SpectreWorker:
 
     def forward_batch_generation(self, batch: ScheduleBatch) -> GenerationBatchResult:
         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
-            forward_done = self._target_forward_done_event
-            current_stream = torch.cuda.current_stream()
-            partition_active = False
-            forward_recorded = False
-            if self.specstream_runtime is not None:
-                partition_active = self.specstream_runtime.begin_target_partition(
-                    batch, None
-                )
-            try:
-                logits_output, next_token_ids, _ = self.forward_target_extend(batch)
-                forward_done.record(current_stream)
-                forward_recorded = True
-                batch.spectre_target_forward_done_event = forward_done
-                self._recv_drafts_after_extend(batch, next_token_ids)
-                forward_done.synchronize()
-            finally:
-                batch.spectre_target_forward_done_event = None
-                if partition_active and self.specstream_runtime is not None:
-                    if forward_recorded:
-                        forward_done.synchronize()
-                    self.specstream_runtime.end_target_partition()
+            logits_output, next_token_ids, _ = self.forward_target_extend(batch)
+            self._recv_drafts_after_extend(batch, next_token_ids)
             if self.specstream_runtime is not None:
                 self.specstream_runtime.after_extend(batch)
             return GenerationBatchResult(
@@ -442,47 +423,37 @@ class SpectreWorker:
         forward_start = self._target_forward_start_event
         forward_done = self._target_forward_done_event
         current_stream = torch.cuda.current_stream()
-
-        partition_active = False
-        forward_recorded = False
-        forward_completed = False
-        if self.specstream_runtime is not None:
-            partition_active = self.specstream_runtime.begin_target_partition(
-                batch, specstream_meta
-            )
-
-        try:
-            forward_start.record(current_stream)
-            host_forward_started = time.perf_counter()
-            batch_result = self.target_worker.forward_batch_generation(
-                model_worker_batch, is_verify=True
-            )
-            host_forward_ms = (time.perf_counter() - host_forward_started) * 1000
-            forward_done.record(current_stream)
-            forward_recorded = True
-            logits_output, can_run_cuda_graph = (
-                batch_result.logits_output,
-                batch_result.can_run_cuda_graph,
-            )
-            new_drafts_per_req: dict = {}
-            if recv_draft_fn is not None and not batch.forward_mode.is_idle():
-                batch.spectre_target_forward_done_event = forward_done
-                try:
-                    new_drafts_per_req = recv_draft_fn(batch)
-                finally:
-                    batch.spectre_target_forward_done_event = None
-                if getattr(batch, "spectre_draft_timeout", False):
-                    retry_fn = None
-            forward_done.synchronize()
-            forward_completed = True
-            gpu_forward_ms = forward_start.elapsed_time(forward_done)
-        finally:
-            batch.spectre_target_forward_done_event = None
-            if partition_active and self.specstream_runtime is not None:
-                if forward_recorded and not forward_completed:
-                    forward_done.synchronize()
-                self.specstream_runtime.end_target_partition()
-
+        forward_start.record(current_stream)
+        host_forward_started = time.perf_counter()
+        batch_result = self.target_worker.forward_batch_generation(
+            model_worker_batch, is_verify=True
+        )
+        host_forward_ms = (time.perf_counter() - host_forward_started) * 1000
+        forward_done.record(current_stream)
+        logits_output, can_run_cuda_graph = (
+            batch_result.logits_output,
+            batch_result.can_run_cuda_graph,
+        )
+        # The Target forward is asynchronous.  Receive the next-round remote
+        # draft while its GPU work is executing, then wait only for this
+        # forward's completion event before CPU/GPU result consumption.  A
+        # device-wide synchronize here destroyed SPECTRE's Draft-Verify overlap
+        # and also waited for unrelated D2H/H2D streams.
+        new_drafts_per_req: dict = {}
+        if recv_draft_fn is not None and not batch.forward_mode.is_idle():
+            batch.spectre_target_forward_done_event = forward_done
+            try:
+                new_drafts_per_req = recv_draft_fn(batch)
+            finally:
+                batch.spectre_target_forward_done_event = None
+            if getattr(batch, "spectre_draft_timeout", False):
+                # The receive deadline already established Drafter overload.
+                # A synchronous retry would add another half-timeout to the
+                # same critical path; subsequent batches enter q=1 backoff
+                # before the controller probes the Drafter again.
+                retry_fn = None
+        forward_done.synchronize()
+        gpu_forward_ms = forward_start.elapsed_time(forward_done)
         if self.specstream_runtime is not None:
             self.specstream_runtime.record_target_forward(
                 specstream_meta, gpu_forward_ms, enqueue_ms=host_forward_ms

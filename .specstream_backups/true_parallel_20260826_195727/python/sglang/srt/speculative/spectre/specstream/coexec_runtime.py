@@ -33,18 +33,6 @@ class _RoundGrantState:
     outstanding_since: float = 0.0
     last_grant_wait_ms: float = 0.0
     last_decision: GrantDecision | None = None
-    # The first SLACK_FILL grant opens one overlap window for this round.
-    # Continuations must reuse the exact same Draft TPC range so they stay
-    # disjoint from Target's already-installed complementary [k,N) mask.
-    overlap_open: bool = False
-    overlap_blocked: bool = False
-    overlap_tpc_low: int = 0
-    overlap_tpc_high: int = 0
-    # Absolute CLOCK_MONOTONIC deadline for the entire Target overlap window.
-    # ACK/regrant cycles must never extend this deadline.
-    overlap_deadline_us: int | None = None
-    overlap_grants_issued: int = 0
-    catchup_grants_issued: int = 0
 
 
 class TargetGrantRuntime:
@@ -95,11 +83,10 @@ class TargetGrantRuntime:
         *,
         target_waiting: bool,
         deadline_us: int | None,
-        decision_override: GrantDecision | None = None,
     ) -> SpectreRequest | None:
         if state.outstanding_epoch is not None or state.issued >= state.desired_q:
             return None
-        decision = decision_override or self.controller.decide(
+        decision = self.controller.decide(
             target_shape=state.target_shape,
             draft_bs=state.draft_bs,
             draft_ctx_bucket=state.draft_ctx_bucket,
@@ -145,16 +132,6 @@ class TargetGrantRuntime:
             deadline_us=effective_deadline_us,
             grant_state=decision.state.value,
         )
-        if decision.state is GrantState.SLACK_FILL:
-            if not state.overlap_open:
-                state.overlap_open = True
-                state.overlap_tpc_low = int(decision.tpc_low)
-                state.overlap_tpc_high = int(decision.tpc_high)
-                state.overlap_deadline_us = effective_deadline_us
-            state.overlap_grants_issued += 1
-        elif decision.state is GrantState.DRAFT_CATCHUP:
-            state.catchup_grants_issued += 1
-
         state.issued += 1
         state.outstanding_epoch = epoch
         state.outstanding_since = time.perf_counter()
@@ -203,57 +180,6 @@ class TargetGrantRuntime:
         self.controller.record_overlap_slowdown(slowdown)
         self._active_overlap_baselines_ms = []
 
-    def overlap_grants(
-        self,
-        keys: list[tuple[str, int]],
-        *,
-        now_us: int | None = None,
-    ) -> list[SpectreRequest]:
-        """Continue one-token SLACK_FILL while Target CUDA is still running.
-
-        One request still has at most one outstanding grant.  Continuation is
-        legal only if an initial SLACK_FILL grant opened the round before
-        Target launch.  The Draft TPC range and absolute deadline are frozen
-        for the whole overlap window.
-        """
-        now = time.monotonic_ns() // 1000 if now_us is None else int(now_us)
-        messages: list[SpectreRequest] = []
-        for key in keys:
-            state = self._rounds.get(key)
-            if state is None:
-                continue
-            if not state.overlap_open or state.overlap_blocked:
-                continue
-            if state.outstanding_epoch is not None or state.issued >= state.desired_q:
-                continue
-            if (
-                state.overlap_deadline_us is not None
-                and now >= int(state.overlap_deadline_us)
-            ):
-                continue
-
-            frozen = GrantDecision(
-                GrantState.SLACK_FILL,
-                "continuous_slack_fill",
-                int(state.overlap_tpc_low),
-                int(state.overlap_tpc_high),
-                state.overlap_deadline_us,
-                (
-                    state.last_decision.profile_entry
-                    if state.last_decision is not None
-                    else None
-                ),
-            )
-            message = self._issue(
-                state,
-                target_waiting=False,
-                deadline_us=state.overlap_deadline_us,
-                decision_override=frozen,
-            )
-            if message is not None:
-                messages.append(message)
-        return messages
-
     def waiting_grants(
         self,
         keys: list[tuple[str, int]],
@@ -290,10 +216,10 @@ class TargetGrantRuntime:
         state.outstanding_epoch = None
         state.outstanding_since = 0.0
         if ack_tokens == 0:
-            # Re-prefill is not calibrated for SLACK_FILL.  Do not create a
-            # zero-token ACK -> overlap-grant loop; wait for DRAFT_CATCHUP.
+            # A Drafter can explicitly defer a re-prefill grant that was
+            # calibrated only for decode.  It consumed no token budget, so the
+            # next DRAFT_CATCHUP quantum must still be issuable.
             state.issued = max(state.issued - 1, state.acked)
-            state.overlap_blocked = True
             return True
         state.acked += 1
         return True

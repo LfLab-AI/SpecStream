@@ -504,82 +504,6 @@ class TpModelWorker(BaseTpWorker):
             can_run_cuda_graph=can_run_cuda_graph,
         )
 
-
-    def specstream_begin_controlled_draft_forward(self) -> None:
-        self._specstream_controlled_draft_forward = True
-
-    def specstream_end_controlled_draft_forward(self) -> None:
-        self._specstream_controlled_draft_forward = False
-
-    def specstream_draft_mask_active(self) -> bool:
-        """Return whether a real Draft TPC range has been installed."""
-        return self._last_specstream_draft_tpc_range is not None
-
-    def specstream_total_tpcs(self):
-        """Return the physical TPC count reported by the native SMController."""
-        if self.specstream_smctrl is None:
-            return None
-        return int(self.specstream_smctrl.total_tpcs)
-
-    def specstream_apply_draft_tpc_range(
-        self,
-        tpc_low: int,
-        tpc_high: int,
-    ) -> None:
-        """Install a Draft TPC range through SpecStream's native SM-control path.
-
-        SMController intentionally exposes set_stream_mask() for both mask scopes.
-        With mask_scope="global", set_stream_mask() internally calls
-        libsmctrl_set_global_mask().  Therefore we must reuse
-        set_specstream_draft_tpc_mask() instead of looking for nonexistent Python
-        methods such as set_global_mask() or set_global_tpc_range().
-        """
-        low = int(tpc_low)
-        high = int(tpc_high)
-
-        if low < 0 or high <= low:
-            raise ValueError(
-                f"invalid Draft TPC range [{low}, {high})"
-            )
-
-        if self.specstream_smctrl is None:
-            raise RuntimeError(
-                "SpecStream Draft SMController is not initialized"
-            )
-
-        total_tpcs = int(self.specstream_smctrl.total_tpcs)
-        if high > total_tpcs:
-            raise ValueError(
-                f"Draft TPC range [{low}, {high}) exceeds "
-                f"total_tpcs={total_tpcs}"
-            )
-
-        # This is the native and correct implementation:
-        #
-        #   set_specstream_draft_tpc_mask()
-        #       -> self.specstream_smctrl.set_stream_mask(
-        #              self.specstream_draft_stream, low, high
-        #          )
-        #
-        # When mask_scope == "global", SMController itself invokes
-        # libsmctrl_set_global_mask().
-        self.set_specstream_draft_tpc_mask(low, high)
-
-        # Compatibility marker used by the first-grant bootstrap guard.
-        self._specstream_active_draft_tpc_range = (low, high)
-
-    def specstream_bootstrap_calibration_mask_if_needed(self) -> None:
-        if self.specstream_draft_mask_active():
-            return
-        if not bool(getattr(self.server_args, "specstream_smctrl_enabled", False)):
-            return
-        tpcs = int(
-            getattr(self.server_args, "specstream_smctrl_calibration_tpcs", 0) or 0
-        )
-        if tpcs <= 0:
-            return
-        self.specstream_apply_draft_tpc_range(0, tpcs)
-
     def forward_batch_generation(
         self,
         model_worker_batch: ModelWorkerBatch,
@@ -596,18 +520,10 @@ class TpModelWorker(BaseTpWorker):
                 is_verify=is_verify,
                 skip_attn_backend_init=skip_attn_backend_init,
             )
-
-        # Only a scheduler-marked remote Draft forward is grant-controlled.
-        # Ordinary/local/warmup forwards keep the native SGLang path.
-        if getattr(self, "_specstream_controlled_draft_forward", False):
-            # Fixed-TPC calibration must establish a real spatial mask before the
-            # first controlled forward.
-            self.specstream_bootstrap_calibration_mask_if_needed()
-            if not self.specstream_draft_mask_active():
-                raise RuntimeError(
-                    "SpecStream refused an ungranted Draft forward: "
-                    "no TPC mask is active"
-                )
+        if self._last_specstream_draft_tpc_range is None:
+            raise RuntimeError(
+                "SpecStream refused an ungranted Draft forward: no TPC mask is active"
+            )
 
         caller_stream = torch.cuda.current_stream(self.device)
         self.specstream_draft_stream.wait_stream(caller_stream)

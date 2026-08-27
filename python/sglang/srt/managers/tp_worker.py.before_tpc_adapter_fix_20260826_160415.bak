@@ -512,60 +512,106 @@ class TpModelWorker(BaseTpWorker):
         self._specstream_controlled_draft_forward = False
 
     def specstream_draft_mask_active(self) -> bool:
-        """Return whether a real Draft TPC range has been installed."""
-        return self._last_specstream_draft_tpc_range is not None
+        return getattr(self, "_specstream_active_draft_tpc_range", None) is not None
 
     def specstream_total_tpcs(self):
-        """Return the physical TPC count reported by the native SMController."""
-        if self.specstream_smctrl is None:
-            return None
-        return int(self.specstream_smctrl.total_tpcs)
+        for name in (
+            "_specstream_draft_smctrl",
+            "specstream_draft_smctrl",
+            "_specstream_smctrl",
+            "specstream_smctrl",
+        ):
+            ctrl = getattr(self, name, None)
+            if ctrl is not None and hasattr(ctrl, "total_tpcs"):
+                return int(ctrl.total_tpcs)
+        return None
 
-    def specstream_apply_draft_tpc_range(
-        self,
-        tpc_low: int,
-        tpc_high: int,
-    ) -> None:
-        """Install a Draft TPC range through SpecStream's native SM-control path.
-
-        SMController intentionally exposes set_stream_mask() for both mask scopes.
-        With mask_scope="global", set_stream_mask() internally calls
-        libsmctrl_set_global_mask().  Therefore we must reuse
-        set_specstream_draft_tpc_mask() instead of looking for nonexistent Python
-        methods such as set_global_mask() or set_global_tpc_range().
-        """
-        low = int(tpc_low)
-        high = int(tpc_high)
-
+    def specstream_apply_draft_tpc_range(self, tpc_low: int, tpc_high: int) -> None:
+        low, high = int(tpc_low), int(tpc_high)
         if low < 0 or high <= low:
-            raise ValueError(
-                f"invalid Draft TPC range [{low}, {high})"
-            )
+            raise ValueError(f"invalid Draft TPC range [{low}, {high})")
 
-        if self.specstream_smctrl is None:
+        ctrl = None
+        for name in (
+            "_specstream_draft_smctrl",
+            "specstream_draft_smctrl",
+            "_specstream_smctrl",
+            "specstream_smctrl",
+        ):
+            candidate = getattr(self, name, None)
+            if candidate is not None:
+                ctrl = candidate
+                break
+        if ctrl is None:
             raise RuntimeError(
-                "SpecStream Draft SMController is not initialized"
+                "SpecStream Draft SMController was not initialized in TpModelWorker"
             )
 
-        total_tpcs = int(self.specstream_smctrl.total_tpcs)
-        if high > total_tpcs:
-            raise ValueError(
-                f"Draft TPC range [{low}, {high}) exceeds "
-                f"total_tpcs={total_tpcs}"
+        scope = str(
+            getattr(self.server_args, "specstream_smctrl_mask_scope", "global")
+            or "global"
+        ).lower()
+
+        applied = False
+        errors = []
+
+        if scope == "global":
+            for name in (
+                "set_global_tpc_range",
+                "set_global_tpc_mask",
+                "set_global_mask",
+                "set_tpc_range",
+                "set_mask",
+            ):
+                fn = getattr(ctrl, name, None)
+                if fn is None:
+                    continue
+                for args in ((low, high), (range(low, high),)):
+                    try:
+                        fn(*args)
+                        applied = True
+                        break
+                    except TypeError as exc:
+                        errors.append(f"{name}{args}: {exc}")
+                if applied:
+                    break
+        else:
+            stream = None
+            for name in (
+                "specstream_draft_stream",
+                "_specstream_draft_stream",
+                "specstream_forward_stream",
+                "_specstream_forward_stream",
+            ):
+                candidate = getattr(self, name, None)
+                if candidate is not None:
+                    stream = candidate
+                    break
+
+            fn = getattr(ctrl, "set_stream_mask", None)
+            if fn is not None and stream is not None:
+                for args in (
+                    (stream, low, high),
+                    (stream, range(low, high)),
+                ):
+                    try:
+                        fn(*args)
+                        applied = True
+                        break
+                    except TypeError as exc:
+                        errors.append(f"set_stream_mask{args}: {exc}")
+
+        if not applied:
+            public = [
+                x for x in dir(ctrl)
+                if "mask" in x.lower() or "tpc" in x.lower()
+            ]
+            raise RuntimeError(
+                "Cannot apply SpecStream Draft TPC mask. "
+                f"scope={scope}, controller={type(ctrl).__name__}, "
+                f"candidate_methods={public}, attempts={errors}"
             )
 
-        # This is the native and correct implementation:
-        #
-        #   set_specstream_draft_tpc_mask()
-        #       -> self.specstream_smctrl.set_stream_mask(
-        #              self.specstream_draft_stream, low, high
-        #          )
-        #
-        # When mask_scope == "global", SMController itself invokes
-        # libsmctrl_set_global_mask().
-        self.set_specstream_draft_tpc_mask(low, high)
-
-        # Compatibility marker used by the first-grant bootstrap guard.
         self._specstream_active_draft_tpc_range = (low, high)
 
     def specstream_bootstrap_calibration_mask_if_needed(self) -> None:

@@ -27,11 +27,6 @@ from sglang.srt.speculative.spectre.spectre_protocol import (
     SpecType,
 )
 from sglang.srt.utils import DynamicGradMode, broadcast_pyobj
-from sglang.srt.speculative.spectre.specstream.draft_grant_runtime import (
-    DraftGrantGate,
-    call_runtime_first_available,
-    normalize_external_grant,
-)
 
 if TYPE_CHECKING:
     pass
@@ -108,162 +103,6 @@ class SpectreDraftSchedulerMixin:
         self.draft_cleanup_interval: int = int(
             os.environ.get("SGLANG_DRAFT_CLEANUP_INTERVAL", "500")
         )
-        self._specstream_init_first_grant_gate()
-
-
-    def _specstream_smctrl_enabled_for_draft(self) -> bool:
-        return bool(getattr(self.server_args, "specstream_smctrl_enabled", False))
-
-    def _specstream_calibration_tpcs(self) -> int:
-        return int(
-            getattr(self.server_args, "specstream_smctrl_calibration_tpcs", 0) or 0
-        )
-
-    def _specstream_underlying_tp_worker(self):
-        worker = getattr(self, "model_worker", None)
-        if worker is None:
-            raise RuntimeError("SpecStream cannot find Scheduler.model_worker")
-        return getattr(worker, "target_worker", worker)
-
-    def _specstream_init_first_grant_gate(self) -> None:
-        if not self._specstream_smctrl_enabled_for_draft():
-            self._specstream_draft_grant_gate = None
-            return
-
-        if not bool(getattr(self.server_args, "spectre_draft_priority", False)):
-            raise RuntimeError(
-                "SpecStream SM control requires --spectre-draft-priority so "
-                "one-token grant boundaries cannot be bypassed"
-            )
-
-        worker = self._specstream_underlying_tp_worker()
-        total_tpcs = None
-        fn = getattr(worker, "specstream_total_tpcs", None)
-        if callable(fn):
-            total_tpcs = fn()
-
-        self._specstream_draft_grant_gate = DraftGrantGate(
-            total_tpcs=total_tpcs
-        )
-
-        calibration_tpcs = self._specstream_calibration_tpcs()
-        if calibration_tpcs > 0:
-            grant = self._specstream_draft_grant_gate.install_calibration_grant(
-                calibration_tpcs
-            )
-            self._specstream_apply_grant_to_worker(grant)
-            if getattr(self, "tp_rank", 0) == 0:
-                logger.info(
-                    "SpecStream calibration bootstrap grant active before first "
-                    "Draft forward: epoch=%d tpc=[%d,%d)",
-                    grant.epoch,
-                    grant.tpc_low,
-                    grant.tpc_high,
-                )
-
-    def _specstream_req_ids(self, batch) -> tuple[str, ...]:
-        if batch is None:
-            return ()
-        if isinstance(batch, (list, tuple)):
-            reqs = batch
-        else:
-            reqs = getattr(batch, "reqs", ())
-        return tuple(
-            str(r.rid)
-            for r in reqs
-            if hasattr(r, "rid")
-        )
-
-    def _specstream_existing_coexec_runtime(self):
-        names = (
-            "specstream_coexec_runtime",
-            "_specstream_coexec_runtime",
-            "coexec_runtime",
-            "target_grant_runtime",
-            "grant_runtime",
-        )
-        for owner in (self, getattr(self, "model_worker", None)):
-            if owner is None:
-                continue
-            for name in names:
-                obj = getattr(owner, name, None)
-                if obj is not None:
-                    return obj
-        return None
-
-    def _specstream_poll_online_grant(self, batch):
-        gate = getattr(self, "_specstream_draft_grant_gate", None)
-        if gate is None:
-            return None
-
-        if self._specstream_calibration_tpcs() > 0:
-            return gate.try_acquire(self._specstream_req_ids(batch))
-
-        runtime = self._specstream_existing_coexec_runtime()
-        req_ids = self._specstream_req_ids(batch)
-        external = call_runtime_first_available(
-            runtime,
-            (
-                "try_acquire_one_token",
-                "try_acquire_draft_grant",
-                "acquire_draft_grant",
-                "get_active_draft_grant",
-                "current_draft_grant",
-            ),
-            batch=batch,
-            request_ids=req_ids,
-        )
-        grant = normalize_external_grant(external)
-        if grant is not None:
-            gate.install_online_grant(grant)
-
-        return gate.try_acquire(req_ids)
-
-    def _specstream_apply_grant_to_worker(self, grant) -> None:
-        worker = self._specstream_underlying_tp_worker()
-        fn = getattr(worker, "specstream_apply_draft_tpc_range", None)
-        if fn is None:
-            raise RuntimeError(
-                "TpModelWorker lacks specstream_apply_draft_tpc_range(); "
-                "tp_worker patch was not applied"
-            )
-        fn(int(grant.tpc_low), int(grant.tpc_high))
-
-    def _specstream_begin_controlled_forward(self) -> None:
-        worker = self._specstream_underlying_tp_worker()
-        fn = getattr(worker, "specstream_begin_controlled_draft_forward", None)
-        if fn is not None:
-            fn()
-
-    def _specstream_end_controlled_forward(self) -> None:
-        worker = self._specstream_underlying_tp_worker()
-        fn = getattr(worker, "specstream_end_controlled_draft_forward", None)
-        if fn is not None:
-            fn()
-
-    def _specstream_finish_one_granted_step(
-        self, batch, *, success: bool
-    ) -> None:
-        gate = getattr(self, "_specstream_draft_grant_gate", None)
-        if gate is None:
-            return
-        gate.complete_one_step(success=success)
-
-        if self._specstream_calibration_tpcs() > 0:
-            return
-
-        runtime = self._specstream_existing_coexec_runtime()
-        call_runtime_first_available(
-            runtime,
-            (
-                "complete_draft_step",
-                "ack_draft_grant",
-                "complete_one_token",
-                "mark_draft_step_complete",
-            ),
-            batch=batch,
-            request_ids=self._specstream_req_ids(batch),
-        )
 
     def _get_draft_state(self, req_id: str) -> Optional[SpectreDraftState]:
         return self.draft_state_manager.get_state(req_id)
@@ -314,8 +153,11 @@ class SpectreDraftSchedulerMixin:
             if self.draft_forward_cycle % self.draft_cleanup_interval == 0:
                 self._cleanup_stale_draft_states()
 
-
     def _run_draft_priority_phase(self) -> None:
+        if self._specstream_grants_enabled:
+            self._run_granted_draft_step()
+            return
+
         saved_last_batch = self.last_batch
         self._filter_draft_batch()
 
@@ -323,69 +165,30 @@ class SpectreDraftSchedulerMixin:
             self.last_batch = saved_last_batch
             return
 
-        if not self._specstream_smctrl_enabled_for_draft():
-            remaining_steps = max(
-                (
-                    r.draft_tokens_target
-                    - (len(r.output_ids) - r.draft_generation_start_len)
-                )
-                for r in self.draft_batch.reqs
-                if not getattr(r, "draft_is_paused", False)
-            )
-            max_steps = self.server_args.spectre_max_draft_priority_steps
-            if max_steps <= 0:
-                max_steps = remaining_steps
-            steps_taken = max(1, min(remaining_steps, max_steps))
+        remaining_steps = max(
+            (r.draft_tokens_target - (len(r.output_ids) - r.draft_generation_start_len))
+            for r in self.draft_batch.reqs
+            if not getattr(r, "draft_is_paused", False)
+        )
+        max_steps = self.server_args.spectre_max_draft_priority_steps
+        if max_steps <= 0:
+            max_steps = remaining_steps
+        steps_taken = max(1, min(remaining_steps, max_steps))
 
-            for _step in range(steps_taken):
-                self._filter_draft_batch()
-                if self.draft_batch.is_empty():
-                    break
-                if not self.draft_batch.check_decode_mem():
-                    self._handle_draft_batch_oom()
-                    break
-                self.draft_batch.prepare_for_decode()
-                result = self.run_batch(self.draft_batch)
-                self._process_draft_decode_result(
-                    self.draft_batch, result
-                )
-                self._update_draft_batch_after_decode()
+        for _step in range(steps_taken):
+            self._filter_draft_batch()
+            if self.draft_batch.is_empty():
+                break
 
-            self.last_batch = saved_last_batch
-            return
+            if not self.draft_batch.check_decode_mem():
+                self._handle_draft_batch_oom()
+                break
 
-        # I2: no grant -> no GPU forward.
-        grant = self._specstream_poll_online_grant(self.draft_batch)
-        if grant is None:
-            self.last_batch = saved_last_batch
-            return
-
-        if not self.draft_batch.check_decode_mem():
-            gate = self._specstream_draft_grant_gate
-            if gate is not None and gate.inflight:
-                gate.complete_one_step(success=False)
-            self._handle_draft_batch_oom()
-            self.last_batch = saved_last_batch
-            return
-
-        self._specstream_apply_grant_to_worker(grant)
-        self.draft_batch.prepare_for_decode()
-
-        success = False
-        self._specstream_begin_controlled_forward()
-        try:
+            self.draft_batch.prepare_for_decode()
             result = self.run_batch(self.draft_batch)
-            self._process_draft_decode_result(
-                self.draft_batch, result
-            )
+            self._process_draft_decode_result(self.draft_batch, result)
+
             self._update_draft_batch_after_decode()
-            self.draft_forward_cycle += 1
-            success = True
-        finally:
-            self._specstream_end_controlled_forward()
-            self._specstream_finish_one_granted_step(
-                self.draft_batch, success=success
-            )
 
         self.last_batch = saved_last_batch
 
@@ -707,15 +510,6 @@ class SpectreDraftSchedulerMixin:
         if not admitted:
             return
 
-        if self._specstream_smctrl_enabled_for_draft():
-            _specstream_prefill_grant = self._specstream_poll_online_grant(admitted)
-            if _specstream_prefill_grant is None:
-                self.draft_waiting_queue = admitted + self.draft_waiting_queue
-                return
-            self._specstream_apply_grant_to_worker(_specstream_prefill_grant)
-        else:
-            _specstream_prefill_grant = None
-
         draft_prefill_batch = ScheduleBatch.init_new(
             admitted,
             self.req_to_token_pool,
@@ -730,19 +524,7 @@ class SpectreDraftSchedulerMixin:
             assert grants is not None
             self._apply_batch_grant_mask(grants.values())
         started = time.perf_counter()
-        if _specstream_prefill_grant is None:
-            result = self.run_batch(draft_prefill_batch)
-        else:
-            _specstream_prefill_success = False
-            self._specstream_begin_controlled_forward()
-            try:
-                result = self.run_batch(draft_prefill_batch)
-                _specstream_prefill_success = True
-            finally:
-                self._specstream_end_controlled_forward()
-                self._specstream_finish_one_granted_step(
-                    draft_prefill_batch, success=_specstream_prefill_success
-                )
+        result = self.run_batch(draft_prefill_batch)
         if self._specstream_grants_enabled:
             self._synchronize_specstream_draft_stream()
             elapsed_ms = (time.perf_counter() - started) * 1000.0

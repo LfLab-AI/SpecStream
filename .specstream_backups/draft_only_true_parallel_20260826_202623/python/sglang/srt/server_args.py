@@ -569,7 +569,6 @@ class ServerArgs:
     specstream_smctrl_calibration_tpcs: int = 0
     specstream_smctrl_calibration_allow_overlap: bool = False
     specstream_smctrl_complementary_partition: bool = False
-    specstream_smctrl_draft_only_parallel: bool = False
     specstream_tp_straggler_control: bool = False
     specstream_colocated_tp_rank: int = 0
     specstream_tp_straggler_budget_ms: float = 1.0
@@ -5539,16 +5538,6 @@ class ServerArgs:
                 "Use mutually exclusive TPC subsets during SLACK_FILL: Draft "
                 "uses [0,k) and Target uses [k,N). Requires the validated "
                 "process-global libsmctrl backend."
-            ),
-        )
-        parser.add_argument(
-            "--specstream-smctrl-draft-only-parallel",
-            action="store_true",
-            default=ServerArgs.specstream_smctrl_draft_only_parallel,
-            help=(
-                "Run Target and Drafter concurrently on one GPU while masking "
-                "only the Drafter. Target keeps the full GPU/TPC set. Do not "
-                "combine with --specstream-smctrl-complementary-partition."
             ),
         )
         parser.add_argument(

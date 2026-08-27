@@ -1,0 +1,4 @@
+python = /root/miniconda3/envs/spectre/bin/python
+torch = 2.9.1+cu128
+cuda = 12.8
+sglang = /root/lifei/SpecStream/python/sglang/__init__.py

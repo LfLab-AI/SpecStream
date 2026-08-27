@@ -332,36 +332,21 @@ class SchedulerSpectreTargetMixin:
             except RuntimeError:
                 return False
 
-        def pump_grants() -> None:
-            if runtime is None or not pending_rids:
+        def pump_waiting_grants() -> None:
+            if runtime is None or not pending_rids or not target_forward_complete():
                 return
             keys = [key for key in grant_keys if key[0] in pending_rids]
-            if not keys:
-                return
-
-            if target_forward_complete():
-                # Target critical CUDA forward has completed: remaining Draft
-                # work is catchup and may consume the calibrated catchup quota.
-                grant_messages = runtime.waiting_grants(
-                    keys, deadline_us=grant_deadline_us
-                )
-            else:
-                # True Draft-Verify co-execution.  An ACK clears the previous
-                # one-token epoch; refill another SLACK_FILL quantum while the
-                # Target completion event is still incomplete.
-                grant_messages = runtime.overlap_grants(
-                    keys, now_us=time.monotonic_ns() // 1000
-                )
-
+            grant_messages = runtime.waiting_grants(keys, deadline_us=grant_deadline_us)
             if grant_messages:
                 self._zmq_send(grant_messages)
 
-        # Initial SLACK_FILL was sent with the Draft request.  From now on,
-        # ACKs can continuously refill the Target-forward overlap window.
-        pump_grants()
+        # DRAFT_CATCHUP is issued only after the asynchronous Target CUDA
+        # forward has completed.  Before that point, only an offline-approved
+        # SLACK_FILL grant sent at round start may execute.
+        pump_waiting_grants()
 
         while pending_rids:
-            pump_grants()
+            pump_waiting_grants()
             msgs = self._drain_msg_buffer()
             if msgs:
                 all_messages.extend(msgs)
@@ -379,8 +364,7 @@ class SchedulerSpectreTargetMixin:
                         pending_rids.discard(msg.request_id)
                 if not pending_rids:
                     break
-                # ACK may have just cleared the outstanding epoch.
-                pump_grants()
+                pump_waiting_grants()
 
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
@@ -703,32 +687,6 @@ class SchedulerSpectreTargetMixin:
                         if runtime is not None
                         else []
                     )
-
-                    # Complementary-ablation mode pre-arms Target=[k,N).
-                    # Mainline draft-only mode intentionally skips Target masking:
-                    # Target stays unrestricted while Drafter alone uses [0,k).
-                    partition_prearmed = False
-                    draft_only_parallel = bool(
-                        getattr(
-                            getattr(runtime, "config", None),
-                            "smctrl_draft_only_parallel",
-                            False,
-                        )
-                    )
-                    if (
-                        grant_reqs
-                        and runtime is not None
-                        and not draft_only_parallel
-                    ):
-                        begin_partition = getattr(
-                            runtime, "begin_target_partition", None
-                        )
-                        if begin_partition is not None:
-                            partition_prearmed = bool(
-                                begin_partition(batch, None)
-                            )
-
-                    batch.spectre_target_partition_prearmed = partition_prearmed
                     batch.spectre_draft_request_sent = self._zmq_send(
                         draft_reqs + grant_reqs,
                         wait_for_identity_s=(
@@ -737,13 +695,6 @@ class SchedulerSpectreTargetMixin:
                             else 0.0
                         ),
                     )
-                    if not batch.spectre_draft_request_sent and partition_prearmed:
-                        end_partition = getattr(
-                            runtime, "end_target_partition", None
-                        )
-                        if end_partition is not None:
-                            end_partition()
-                        batch.spectre_target_partition_prearmed = False
 
     def _send_retry_requests(
         self, failed_reqs: List[Req], num_draft_tokens: int

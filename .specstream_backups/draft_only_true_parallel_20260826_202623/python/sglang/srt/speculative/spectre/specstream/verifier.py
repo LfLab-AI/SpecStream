@@ -1083,11 +1083,7 @@ class SpecStreamTargetRuntime:
         self._last_target_tpc_range: tuple[int, int] | None = None
         self._active_target_partition: ComplementaryTPCPartition | None = None
 
-        if (
-            config.smctrl_enabled
-            and config.smctrl_complementary_partition
-            and not config.smctrl_draft_only_parallel
-        ):
+        if config.smctrl_enabled and config.smctrl_complementary_partition:
             self.target_smctrl = SMController(
                 config.smctrl_library or None,
                 # Do not derive the CUDA index from model_runner.device:
@@ -1110,12 +1106,6 @@ class SpecStreamTargetRuntime:
                 "SpecStream complementary Target TPC controller ready: "
                 "full=[0,%d)",
                 self.target_total_tpcs,
-            )
-
-        if config.smctrl_enabled and config.smctrl_draft_only_parallel:
-            logger.info(
-                "SpecStream draft-only true parallel: Target TPC mask is DISABLED; "
-                "Target keeps all visible TPCs while Drafter alone is TPC-limited"
             )
 
         self.mps_environment = read_mps_environment()
@@ -1330,11 +1320,6 @@ class SpecStreamTargetRuntime:
 
     def begin_target_partition(self, batch, meta=None) -> bool:
         # During parallel SLACK_FILL: Draft=[0,k), Target=[k,N).
-        if self.config.smctrl_draft_only_parallel:
-            # Mainline policy: Target remains unrestricted. Only Drafter is
-            # TPC-limited, while continuous SLACK_FILL still overlaps Draft
-            # tokens with the asynchronous Target forward.
-            return False
         if self.target_smctrl is None:
             return False
         if getattr(batch, "specstream_mode", "parallel") != "parallel":

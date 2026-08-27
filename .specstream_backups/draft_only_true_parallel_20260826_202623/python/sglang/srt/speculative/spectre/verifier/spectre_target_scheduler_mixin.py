@@ -704,22 +704,12 @@ class SchedulerSpectreTargetMixin:
                         else []
                     )
 
-                    # Complementary-ablation mode pre-arms Target=[k,N).
-                    # Mainline draft-only mode intentionally skips Target masking:
-                    # Target stays unrestricted while Drafter alone uses [0,k).
+                    # Install Target=[k,N) before the first SLACK_FILL grant is
+                    # visible to Drafter.  This closes the old launch-order race
+                    # where Draft could observe [0,k) before Target had applied
+                    # its complementary process-global mask.
                     partition_prearmed = False
-                    draft_only_parallel = bool(
-                        getattr(
-                            getattr(runtime, "config", None),
-                            "smctrl_draft_only_parallel",
-                            False,
-                        )
-                    )
-                    if (
-                        grant_reqs
-                        and runtime is not None
-                        and not draft_only_parallel
-                    ):
+                    if grant_reqs and runtime is not None:
                         begin_partition = getattr(
                             runtime, "begin_target_partition", None
                         )
