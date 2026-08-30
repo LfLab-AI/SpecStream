@@ -17,6 +17,7 @@ class ResourceProfileEntry:
     draft_step_ms: float
     target_slowdown: float
     target_baseline_ms: float = 0.0
+    slack_source: str = "target_forward"
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ResourceProfileEntry":
@@ -28,6 +29,7 @@ class ResourceProfileEntry:
             draft_step_ms=float(value["draft_step_ms"]),
             target_slowdown=float(value["target_slowdown"]),
             target_baseline_ms=float(value.get("target_baseline_ms", 0.0)),
+            slack_source=str(value.get("slack_source", "target_forward")),
         )
         if not entry.target_shape:
             raise ValueError("target_shape cannot be empty")
@@ -39,6 +41,8 @@ class ResourceProfileEntry:
             raise ValueError("target_slowdown cannot be negative")
         if not math.isfinite(entry.target_baseline_ms) or entry.target_baseline_ms < 0:
             raise ValueError("target_baseline_ms cannot be negative")
+        if entry.slack_source not in {"target_forward", "history_h2d", "*"}:
+            raise ValueError("slack_source must be target_forward, history_h2d, or *")
         shape = re.fullmatch(r"verify_bs(\d+)_q(\d+)_ctx(.+)", entry.target_shape)
         if shape is not None:
             shape_bs = int(shape.group(1))
@@ -96,6 +100,7 @@ class ResourceProfile:
                 entry.draft_bs,
                 entry.draft_ctx_bucket,
                 entry.draft_tpcs,
+                entry.slack_source,
             )
             for entry in entries
         }
@@ -118,6 +123,7 @@ class ResourceProfile:
         target_shape: str,
         draft_bs: int,
         draft_ctx_bucket: str,
+        slack_source: str | None = None,
     ) -> tuple[ResourceProfileEntry, ...]:
         exact = tuple(
             entry
@@ -125,6 +131,7 @@ class ResourceProfile:
             if entry.target_shape == target_shape
             and entry.draft_bs == draft_bs
             and entry.draft_ctx_bucket == draft_ctx_bucket
+            and (slack_source is None or entry.slack_source in (slack_source, "*"))
         )
         if exact:
             return exact
@@ -137,6 +144,7 @@ class ResourceProfile:
             if entry.target_shape in (target_shape, "*")
             and entry.draft_bs == draft_bs
             and entry.draft_ctx_bucket in (draft_ctx_bucket, "*")
+            and (slack_source is None or entry.slack_source in (slack_source, "*"))
         )
 
     def safe_entries(
@@ -148,11 +156,13 @@ class ResourceProfile:
         slowdown_budget: float,
         slack_us: float | None,
         guard_us: float,
+        slack_source: str = "target_forward",
     ) -> tuple[ResourceProfileEntry, ...]:
         candidates: Iterable[ResourceProfileEntry] = self.matching(
             target_shape=target_shape,
             draft_bs=draft_bs,
             draft_ctx_bucket=draft_ctx_bucket,
+            slack_source=slack_source,
         )
         safe = []
         for entry in candidates:
@@ -174,6 +184,7 @@ class ResourceProfile:
         slowdown_budget: float,
         slack_us: float,
         guard_us: float,
+        slack_source: str = "target_forward",
     ) -> ResourceProfileEntry | None:
         safe = self.safe_entries(
             target_shape=target_shape,
@@ -182,6 +193,7 @@ class ResourceProfile:
             slowdown_budget=slowdown_budget,
             slack_us=slack_us,
             guard_us=guard_us,
+            slack_source=slack_source,
         )
         return safe[-1] if safe else None
 

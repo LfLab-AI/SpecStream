@@ -69,6 +69,15 @@ def test_control_and_tp_metrics_are_written_to_profile(tmp_path):
         target_slowdown=0.08,
     )
     profiler.record_decision(decision, load, tp)
+    profiler.record_grant_decision(
+        SimpleNamespace(
+            state=SimpleNamespace(value="TARGET_EXCLUSIVE"),
+            tpc_low=0,
+            tpc_high=0,
+        ),
+        target_phase="history_h2d",
+        predicted_slack_us=750.0,
+    )
     item = SimpleNamespace(
         rid="r0", committed_len=16384, history_len=8192, tail_tokens=512
     )
@@ -94,6 +103,8 @@ def test_control_and_tp_metrics_are_written_to_profile(tmp_path):
     assert row["mps_active_thread_percentage"] == "80"
     assert row["tp_rank_skew_ms"] == "1.5"
     assert row["target_forward_ms"] == "11.5"
+    assert row["target_phase"] == "history_h2d"
+    assert row["predicted_slack_us"] == "750.0"
 
 
 @pytest.mark.parametrize(
@@ -134,6 +145,39 @@ def test_native_gpu_kv_mode_cannot_enable_offload_only_features():
         SpecStreamConfig(profile_only=True, cohort_enabled=True)
     with pytest.raises(ValueError, match="Full-Restore"):
         SpecStreamConfig(profile_only=True, full_restore_baseline=True)
+
+
+def test_pcie_slack_coexec_requires_tiered_kv_and_sm_control():
+    with pytest.raises(ValueError, match="requires --specstream-enabled"):
+        SpecStreamConfig(profile_only=True, pcie_slack_coexec=True)
+    with pytest.raises(ValueError, match="requires --specstream-smctrl-enabled"):
+        SpecStreamConfig(enabled=True, pcie_slack_coexec=True)
+    with pytest.raises(ValueError, match="requires --specstream-coexec-require-mps"):
+        SpecStreamConfig(
+            enabled=True,
+            pcie_slack_coexec=True,
+            smctrl_enabled=True,
+        )
+
+    config = SpecStreamConfig(
+        spectre_role="target",
+        enabled=True,
+        pcie_slack_coexec=True,
+        smctrl_enabled=True,
+        coexec_require_mps=True,
+    )
+    assert config.pcie_slack_coexec
+
+
+def test_pcie_slack_coexec_rejects_full_restore_baseline():
+    with pytest.raises(ValueError, match="incompatible"):
+        SpecStreamConfig(
+            enabled=True,
+            full_restore_baseline=True,
+            pcie_slack_coexec=True,
+            smctrl_enabled=True,
+            coexec_require_mps=True,
+        )
 
 
 def test_tiered_kv_and_native_gpu_kv_modes_are_mutually_exclusive():

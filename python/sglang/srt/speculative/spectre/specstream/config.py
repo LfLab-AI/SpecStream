@@ -59,6 +59,7 @@ class SpecStreamConfig:
     coexec_pending_high_watermark: int = 16
     coexec_compute_ratio_threshold: float = 0.90
     coexec_require_mps: bool = False
+    pcie_slack_coexec: bool = False
     smctrl_enabled: bool = False
     grant_token_quantum: int = 1
     coexec_target_slowdown_budget: float = 0.05
@@ -167,6 +168,24 @@ class SpecStreamConfig:
                 "SpecStream co-execution requires --specstream-enabled or "
                 "--specstream-profile-only"
             )
+        if self.pcie_slack_coexec and not self.enabled:
+            raise ValueError(
+                "SpecStream PCIe-slack co-execution requires --specstream-enabled"
+            )
+        if self.pcie_slack_coexec and not self.smctrl_enabled:
+            raise ValueError(
+                "SpecStream PCIe-slack co-execution requires "
+                "--specstream-smctrl-enabled"
+            )
+        if self.pcie_slack_coexec and not self.coexec_require_mps:
+            raise ValueError(
+                "SpecStream PCIe-slack co-execution requires "
+                "--specstream-coexec-require-mps"
+            )
+        if self.pcie_slack_coexec and self.spectre_role not in (None, "target"):
+            raise ValueError(
+                "SpecStream PCIe-slack co-execution is a Target-only policy"
+            )
         if (
             self.smctrl_enabled
             and self.spectre_role != "draft"
@@ -184,6 +203,11 @@ class SpecStreamConfig:
         if self.full_restore_baseline and not self.enabled:
             raise ValueError(
                 "SpecStream Full-Restore baseline requires --specstream-enabled"
+            )
+        if self.pcie_slack_coexec and self.full_restore_baseline:
+            raise ValueError(
+                "SpecStream PCIe-slack co-execution is incompatible with "
+                "--specstream-full-restore-baseline"
             )
 
     @property
@@ -234,6 +258,7 @@ class SpecStreamConfig:
                 server_args.specstream_coexec_compute_ratio_threshold
             ),
             coexec_require_mps=bool(server_args.specstream_coexec_require_mps),
+            pcie_slack_coexec=bool(server_args.specstream_pcie_slack_coexec),
             smctrl_enabled=bool(server_args.specstream_smctrl_enabled),
             grant_token_quantum=int(server_args.specstream_grant_token_quantum),
             coexec_target_slowdown_budget=float(

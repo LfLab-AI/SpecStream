@@ -45,6 +45,46 @@ def test_safe_calibrated_window_uses_slack_fill():
     assert (decision.tpc_low, decision.tpc_high) == (0, 4)
 
 
+def test_pcie_slack_requires_a_history_h2d_calibration_entry():
+    controller = _controller()
+    decision = controller.decide(
+        target_shape="shape",
+        draft_bs=2,
+        draft_ctx_bucket="8k",
+        predicted_slack_us=1200,
+        slack_source="history_h2d",
+    )
+    assert decision.state is GrantState.TARGET_EXCLUSIVE
+
+    profile = ResourceProfile.from_dict(
+        {
+            "total_tpcs": 54,
+            "entries": [
+                {
+                    "target_shape": "shape",
+                    "draft_bs": 2,
+                    "draft_ctx_bucket": "8k",
+                    "draft_tpcs": 4,
+                    "draft_step_ms": 1.0,
+                    "target_slowdown": 0.04,
+                    "slack_source": "history_h2d",
+                }
+            ],
+        }
+    )
+    decision = GpuGrantController(
+        profile, target_slowdown_budget=0.05, guard_us=100
+    ).decide(
+        target_shape="shape",
+        draft_bs=2,
+        draft_ctx_bucket="8k",
+        predicted_slack_us=1200,
+        slack_source="history_h2d",
+    )
+    assert decision.state is GrantState.SLACK_FILL
+    assert decision.reason == "measured_safe_pcie_slack"
+
+
 def test_target_wait_uses_catchup_but_still_requires_calibration():
     decision = _controller().decide(
         target_shape="shape",

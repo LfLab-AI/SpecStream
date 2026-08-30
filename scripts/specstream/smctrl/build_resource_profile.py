@@ -51,6 +51,7 @@ def main() -> None:
             int(row["draft_bs"]),
             str(row["draft_ctx_bucket"]),
             int(row["draft_tpcs"]),
+            str(row.get("slack_source", "target_forward")),
         )
         grouped[key].append(row)
 
@@ -83,6 +84,7 @@ def main() -> None:
                 "draft_bs": key[1],
                 "draft_ctx_bucket": key[2],
                 "draft_tpcs": key[3],
+                "slack_source": key[4],
                 "draft_step_ms": draft_step_ms,
                 "target_slowdown": max(
                     0.0, target_latency_ms / target_baseline_ms - 1.0

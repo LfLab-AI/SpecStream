@@ -46,6 +46,7 @@ def row_matches_shape(
     draft_bs: int,
     draft_ctx_bucket: str,
     draft_tpcs: int | None = None,
+    target_phase: str | None = None,
 ) -> bool:
     expected_q = target_q(target_shape)
     if expected_q is not None and int(float(row.get("q", 0) or 0)) != expected_q:
@@ -61,6 +62,15 @@ def row_matches_shape(
         tpc_high = int(float(row.get("draft_tpc_high", -1) or -1))
         if tpc_low < 0 or tpc_high - tpc_low != draft_tpcs:
             return False
+    if target_phase is not None and row.get("target_phase") != target_phase:
+        return False
+    if target_phase == "history_h2d":
+        if int(float(row.get("history_len", 0) or 0)) <= 0:
+            return False
+        if int(float(row.get("h2d_ops", 0) or 0)) <= 0:
+            return False
+        if float(row.get("exposed_copy_ms", 0) or 0) <= 0:
+            return False
     return True
 
 
@@ -72,6 +82,7 @@ def positive_values(
     draft_bs: int,
     draft_ctx_bucket: str,
     draft_tpcs: int | None = None,
+    target_phase: str | None = None,
 ) -> list[float]:
     with path.open(encoding="utf-8", newline="") as handle:
         values = [
@@ -83,6 +94,7 @@ def positive_values(
                 draft_bs=draft_bs,
                 draft_ctx_bucket=draft_ctx_bucket,
                 draft_tpcs=draft_tpcs,
+                target_phase=target_phase,
             )
             and row.get(field)
             and float(row[field]) > 0
@@ -104,6 +116,11 @@ def main() -> None:
     parser.add_argument("--draft-bs", type=int, required=True)
     parser.add_argument("--draft-ctx-bucket", required=True)
     parser.add_argument("--draft-tpcs", type=int, required=True)
+    parser.add_argument(
+        "--slack-source",
+        choices=("target_forward", "history_h2d"),
+        default="target_forward",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -112,6 +129,7 @@ def main() -> None:
         "draft_bs": args.draft_bs,
         "draft_ctx_bucket": args.draft_ctx_bucket,
         "draft_tpcs": args.draft_tpcs,
+        "slack_source": args.slack_source,
         "draft_step_ms": statistics.median(
             positive_values(
                 args.overlap_profile,
@@ -120,6 +138,9 @@ def main() -> None:
                 draft_bs=args.draft_bs,
                 draft_ctx_bucket=args.draft_ctx_bucket,
                 draft_tpcs=args.draft_tpcs,
+                target_phase=(
+                    "history_h2d" if args.slack_source == "history_h2d" else None
+                ),
             )
         ),
         "target_latency_ms": statistics.median(
@@ -130,6 +151,9 @@ def main() -> None:
                 draft_bs=args.draft_bs,
                 draft_ctx_bucket=args.draft_ctx_bucket,
                 draft_tpcs=args.draft_tpcs,
+                target_phase=(
+                    "history_h2d" if args.slack_source == "history_h2d" else None
+                ),
             )
         ),
         "target_baseline_ms": statistics.median(

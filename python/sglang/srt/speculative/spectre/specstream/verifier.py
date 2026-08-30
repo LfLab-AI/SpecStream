@@ -1100,6 +1100,12 @@ class SpecStreamTargetRuntime:
                 self.mps_environment.sm_partition or "none",
                 config.coexec_resource_profile_path,
             )
+        if config.pcie_slack_coexec:
+            logger.info(
+                "SpecStream PCIe-slack colocated Draft mode: grants use only "
+                "warmed-up exposed History H2D estimates and history_h2d "
+                "resource-profile entries; unmeasured windows stay Target-exclusive"
+            )
         if config.colocated_tp_rank >= self.tp_size:
             raise ValueError("SpecStream colocated TP rank is outside the TP group")
 
@@ -1616,9 +1622,25 @@ class SpecStreamTargetRuntime:
         )
         ctx_bucket = context_bucket(max_context)
         target_shape = f"verify_bs{batch_size}_q{int(desired_q)}_ctx{ctx_bucket}"
+        slack_source = "target_forward"
+        target_phase = "target_forward"
         predicted_slack_us = self.slack_profiler.snapshot(
-            "target_forward"
+            target_phase
         ).predicted_slack_us
+        if self.config.pcie_slack_coexec:
+            slack_source = "history_h2d"
+            target_phase = "history_h2d"
+            has_streaming_history = any(
+                (state := self.states.get(str(req.rid))) is not None
+                and state.stream_enabled
+                and state.history_len > 0
+                for req in reqs
+            )
+            predicted_slack_us = (
+                self.profiler.snapshot().exposed_copy_ms * 1000.0
+                if has_streaming_history
+                else 0.0
+            )
         keys = []
         for req in reqs:
             key = (str(req.rid), int(req.spec_cnt))
@@ -1631,18 +1653,43 @@ class SpecStreamTargetRuntime:
                 draft_bs=batch_size,
                 draft_ctx_bucket=ctx_bucket,
                 predicted_slack_us=predicted_slack_us,
+                slack_source=slack_source,
             )
         messages = self.grant_runtime.initial_grants(keys)
         for message in messages:
-            self.profiler.record_grant(message, target_phase="target_forward")
+            self.profiler.record_grant(
+                message,
+                target_phase=target_phase,
+                predicted_slack_us=predicted_slack_us,
+            )
         if not messages:
             for key in keys:
                 state = self.grant_runtime.state_for(*key)
                 if state is not None and state.last_decision is not None:
                     self.profiler.record_grant_decision(
-                        state.last_decision, target_phase="target_forward"
+                        state.last_decision,
+                        target_phase=target_phase,
+                        predicted_slack_us=predicted_slack_us,
                     )
                     break
+        return messages
+
+    def overlap_grants(self, keys):
+        if self.grant_runtime is None:
+            return []
+        messages = self.grant_runtime.overlap_grants(list(keys))
+        for message in messages:
+            state = self.grant_runtime.state_for(
+                str(message.request_id), int(message.spec_cnt or 0)
+            )
+            slack_source = state.slack_source if state is not None else "target_forward"
+            self.profiler.record_grant(
+                message,
+                target_phase=slack_source,
+                predicted_slack_us=(
+                    state.predicted_slack_us if state is not None else 0.0
+                ),
+            )
         return messages
 
     def waiting_grants(self, keys, *, deadline_us: int):

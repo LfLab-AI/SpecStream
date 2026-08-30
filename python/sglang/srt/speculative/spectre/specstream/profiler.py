@@ -72,6 +72,7 @@ class SpecStreamProfileRow:
     coexec_mode: str = ""
     coexec_reason: str = ""
     target_phase: str = ""
+    predicted_slack_us: float = 0.0
     grant_state: str = ""
     grant_epoch: int = 0
     grant_wait_ms: float = 0.0
@@ -166,6 +167,9 @@ class SpecStreamProfiler:
             coexec_mode=str(getattr(decision, "coexec_mode", "")),
             coexec_reason=str(getattr(decision, "reason", "")),
             target_phase=str(self._pending_grant.get("target_phase", "")),
+            predicted_slack_us=float(
+                self._pending_grant.get("predicted_slack_us", 0.0) or 0.0
+            ),
             grant_state=str(self._pending_grant.get("grant_state", "")),
             grant_epoch=int(self._pending_grant.get("grant_epoch", 0) or 0),
             grant_wait_ms=float(self._pending_grant.get("grant_wait_ms", 0.0) or 0.0),
@@ -206,9 +210,12 @@ class SpecStreamProfiler:
         self._pending_grant = {}
         self._pending_network_ms = 0.0
 
-    def record_grant(self, message, *, target_phase: str) -> None:
+    def record_grant(
+        self, message, *, target_phase: str, predicted_slack_us: float = 0.0
+    ) -> None:
         values = {
             "target_phase": str(target_phase),
+            "predicted_slack_us": max(float(predicted_slack_us), 0.0),
             "grant_state": str(getattr(message, "grant_state", "") or ""),
             "grant_epoch": int(getattr(message, "grant_epoch", 0) or 0),
             "draft_tpc_low": int(getattr(message, "tpc_low", -1)),
@@ -221,9 +228,12 @@ class SpecStreamProfiler:
         else:
             self._pending_grant.update(values)
 
-    def record_grant_decision(self, decision, *, target_phase: str) -> None:
+    def record_grant_decision(
+        self, decision, *, target_phase: str, predicted_slack_us: float = 0.0
+    ) -> None:
         values = {
             "target_phase": str(target_phase),
+            "predicted_slack_us": max(float(predicted_slack_us), 0.0),
             "grant_state": str(getattr(getattr(decision, "state", ""), "value", "")),
             "draft_tpc_low": int(getattr(decision, "tpc_low", -1)),
             "draft_tpc_high": int(getattr(decision, "tpc_high", -1)),

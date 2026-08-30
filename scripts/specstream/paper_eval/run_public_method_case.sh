@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${METHOD:?AR/STANDALONE/SPECTRE_P/SPECSTREAM}"
+: "${PUBLIC_CASE_TAG:?Set PUBLIC_CASE_TAG}"
+: "${PUBLIC_DATASET_PATH:?Set PUBLIC_DATASET_PATH}"
+: "${RESULT_ROOT:?Set RESULT_ROOT}"
+
+NUM_PROMPTS="${NUM_PROMPTS:-auto}"
+MAX_PROMPTS="${MAX_PROMPTS:-256}"
+OUTPUT_LEN="${OUTPUT_LEN:-256}"
+REQUEST_RATE="${REQUEST_RATE:-inf}"
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-8}"
+WARMUP_REQUESTS="${WARMUP_REQUESTS:-4}"
+SEED="${SEED:-1}"
+
+BENCH_CMD="CASE_TAG='$PUBLIC_CASE_TAG' \
+PUBLIC_DATASET_PATH='$PUBLIC_DATASET_PATH' \
+TARGET_MODEL='$TARGET_MODEL' \
+TARGET_PORT='$TARGET_PORT' \
+NUM_PROMPTS='$NUM_PROMPTS' \
+MAX_PROMPTS='$MAX_PROMPTS' \
+OUTPUT_LEN='$OUTPUT_LEN' \
+REQUEST_RATE='$REQUEST_RATE' \
+MAX_CONCURRENCY='$MAX_CONCURRENCY' \
+WARMUP_REQUESTS='$WARMUP_REQUESTS' \
+SEED='$SEED' \
+CONTEXT_LEN='$SERVER_CONTEXT_LEN' \
+OUTPUT_DIR='$RESULT_ROOT/bench' \
+bash scripts/specstream/paper_eval/run_public_benchmark_case.sh"
+
+case "$METHOD" in
+
+  AR)
+    export PUBLIC_SERVER_CMD="$AR_TARGET_CMD"
+    export PUBLIC_BENCH_CMD="$BENCH_CMD"
+    export SPECSTREAM_RESULT_ROOT="$RESULT_ROOT/logs/$PUBLIC_CASE_TAG"
+
+    bash scripts/specstream/paper_eval/run_single_server_public.sh
+    ;;
+
+  STANDALONE)
+    export PUBLIC_SERVER_CMD="$STANDALONE_TARGET_CMD"
+    export PUBLIC_BENCH_CMD="$BENCH_CMD"
+    export SPECSTREAM_RESULT_ROOT="$RESULT_ROOT/logs/$PUBLIC_CASE_TAG"
+
+    bash scripts/specstream/paper_eval/run_single_server_public.sh
+    ;;
+
+  SPECTRE_P)
+    export SPECSTREAM_TARGET_VISIBLE_DEVICES="$TARGET_GPU"
+    export SPECSTREAM_DRAFT_VISIBLE_DEVICES="$DRAFT_GPU"
+    export SPECSTREAM_TARGET_CMD="$SPECTRE_PARALLEL_TARGET_CMD"
+    export SPECSTREAM_DRAFT_CMD="$DRAFT_CMD_Q4"
+    export SPECSTREAM_TARGET_READY_CMD="curl -fsS http://127.0.0.1:${TARGET_PORT}/health"
+    export SPECSTREAM_DRAFT_READY_CMD="curl -fsS http://127.0.0.1:${DRAFT_PORT}/health"
+    export SPECSTREAM_RESULT_ROOT="$RESULT_ROOT/logs/$PUBLIC_CASE_TAG"
+    export SPECSTREAM_BENCH_CMD="$BENCH_CMD"
+
+    bash scripts/specstream/run_dedicated_draft_target_baseline.sh
+    ;;
+
+  SPECSTREAM)
+    TARGET_CMD="$SPECSTREAM_FULL_TARGET_TEMPLATE \
+      --specstream-profile-path '$RESULT_ROOT/profiles/${PUBLIC_CASE_TAG}.csv'"
+
+    export SPECSTREAM_TARGET_VISIBLE_DEVICES="$TARGET_GPU"
+    export SPECSTREAM_DRAFT_VISIBLE_DEVICES="$DRAFT_GPU"
+    export SPECSTREAM_TARGET_CMD="$TARGET_CMD"
+    export SPECSTREAM_DRAFT_CMD="$DRAFT_CMD_Q4"
+    export SPECSTREAM_TARGET_READY_CMD="curl -fsS http://127.0.0.1:${TARGET_PORT}/health"
+    export SPECSTREAM_DRAFT_READY_CMD="curl -fsS http://127.0.0.1:${DRAFT_PORT}/health"
+    export SPECSTREAM_RESULT_ROOT="$RESULT_ROOT/logs/$PUBLIC_CASE_TAG"
+    export SPECSTREAM_BENCH_CMD="$BENCH_CMD"
+
+    bash scripts/specstream/run_dedicated_draft_target_baseline.sh
+    ;;
+
+  *)
+    echo "ERROR: unsupported METHOD=$METHOD" >&2
+    exit 2
+    ;;
+esac

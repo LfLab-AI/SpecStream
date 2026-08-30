@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${SPECSTREAM_TARGET_VISIBLE_DEVICES:?Set Target GPU UUID/index}"
+: "${SPECSTREAM_DRAFT_VISIBLE_DEVICES:?Set Draft GPU UUID/index}"
+: "${SPECSTREAM_TARGET_CMD:?Set complete Target launch command}"
+: "${SPECSTREAM_DRAFT_CMD:?Set complete Drafter launch command}"
+: "${SPECSTREAM_BENCH_CMD:?Set benchmark command}"
+
+RESULT_ROOT="${SPECSTREAM_RESULT_ROOT:-results/specstream_dedicated_baseline}"
+TARGET_READY_CMD="${SPECSTREAM_TARGET_READY_CMD:-curl -fsS http://127.0.0.1:30000/health}"
+DRAFT_READY_CMD="${SPECSTREAM_DRAFT_READY_CMD:-}"
+READY_TIMEOUT_S="${SPECSTREAM_READY_TIMEOUT_S:-300}"
+DRAFT_WARMUP_S="${SPECSTREAM_DRAFT_WARMUP_S:-5}"
+
+mkdir -p "$RESULT_ROOT"
+
+target_pid=""
+draft_pid=""
+
+cleanup() {
+  for pid in "$draft_pid" "$target_pid"; do
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+}
+trap cleanup EXIT INT TERM
+
+echo
+echo "============================================================"
+echo "[1/5] Starting Target"
+echo "GPU: $SPECSTREAM_TARGET_VISIBLE_DEVICES"
+echo "Log: $RESULT_ROOT/target.log"
+echo "============================================================"
+
+CUDA_VISIBLE_DEVICES="$SPECSTREAM_TARGET_VISIBLE_DEVICES" \
+  bash -c "$SPECSTREAM_TARGET_CMD" \
+  >"$RESULT_ROOT/target.log" 2>&1 &
+target_pid=$!
+
+deadline=$((SECONDS + READY_TIMEOUT_S))
+
+until bash -c "$TARGET_READY_CMD" >/dev/null 2>&1; do
+  if ! kill -0 "$target_pid" 2>/dev/null; then
+    echo "ERROR: Target exited before readiness"
+    echo "See: $RESULT_ROOT/target.log"
+    tail -n 100 "$RESULT_ROOT/target.log" || true
+    exit 1
+  fi
+
+  if (( SECONDS >= deadline )); then
+    echo "ERROR: Target readiness timed out"
+    tail -n 100 "$RESULT_ROOT/target.log" || true
+    exit 1
+  fi
+
+  sleep 1
+done
+
+echo
+echo "[2/5] Target ready"
+
+echo
+echo "============================================================"
+echo "[3/5] Starting Drafter"
+echo "GPU: $SPECSTREAM_DRAFT_VISIBLE_DEVICES"
+echo "Log: $RESULT_ROOT/draft.log"
+echo "============================================================"
+
+CUDA_VISIBLE_DEVICES="$SPECSTREAM_DRAFT_VISIBLE_DEVICES" \
+  bash -c "$SPECSTREAM_DRAFT_CMD" \
+  >"$RESULT_ROOT/draft.log" 2>&1 &
+draft_pid=$!
+
+if [[ -n "$DRAFT_READY_CMD" ]]; then
+  deadline=$((SECONDS + READY_TIMEOUT_S))
+
+  until bash -c "$DRAFT_READY_CMD" >/dev/null 2>&1; do
+    if ! kill -0 "$draft_pid" 2>/dev/null; then
+      echo "ERROR: Drafter exited before readiness"
+      echo "See: $RESULT_ROOT/draft.log"
+      tail -n 100 "$RESULT_ROOT/draft.log" || true
+      exit 1
+    fi
+
+    if (( SECONDS >= deadline )); then
+      echo "ERROR: Drafter readiness timed out"
+      tail -n 100 "$RESULT_ROOT/draft.log" || true
+      exit 1
+    fi
+
+    sleep 1
+  done
+else
+  sleep "$DRAFT_WARMUP_S"
+fi
+
+echo
+echo "[4/5] Drafter ready"
+
+echo
+echo "============================================================"
+echo "[5/5] Running benchmark"
+echo "Benchmark progress is shown live below."
+echo "A copy is saved to: $RESULT_ROOT/benchmark.log"
+echo "============================================================"
+echo
+
+# 关键修改：
+# 1. PYTHONUNBUFFERED=1：Python 输出不做大块缓冲；
+# 2. 2>&1 | tee：stdout/stderr 同时显示在终端并保存日志；
+# 3. 本脚本已 set -o pipefail，benchmark 失败时不会被 tee 吞掉。
+PYTHONUNBUFFERED=1 \
+  bash -c "$SPECSTREAM_BENCH_CMD" \
+  2>&1 | tee "$RESULT_ROOT/benchmark.log"
+
+echo
+echo "============================================================"
+echo "Benchmark completed successfully."
+echo "Result root: $RESULT_ROOT"
+echo "============================================================"

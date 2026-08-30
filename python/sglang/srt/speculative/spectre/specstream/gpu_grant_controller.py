@@ -73,6 +73,7 @@ class GpuGrantController:
         draft_bs: int,
         draft_ctx_bucket: str,
         predicted_slack_us: float,
+        slack_source: str = "target_forward",
         target_waiting: bool = False,
         deadline_us: int | None = None,
     ) -> GrantDecision:
@@ -128,6 +129,7 @@ class GpuGrantController:
             slowdown_budget=self.target_slowdown_budget,
             slack_us=predicted_slack_us,
             guard_us=self.guard_us,
+            slack_source=slack_source,
         )
         if entry is None:
             return GrantDecision(
@@ -135,7 +137,11 @@ class GpuGrantController:
             )
         return GrantDecision(
             GrantState.SLACK_FILL,
-            "measured_safe_slack",
+            (
+                "measured_safe_pcie_slack"
+                if slack_source == "history_h2d"
+                else "measured_safe_slack"
+            ),
             0,
             entry.draft_tpcs,
             deadline_us,

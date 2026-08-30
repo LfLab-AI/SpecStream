@@ -27,6 +27,8 @@ class _RoundGrantState:
     draft_bs: int
     draft_ctx_bucket: str
     predicted_slack_us: float
+    slack_source: str = "target_forward"
+    overlap_window_end_us: int | None = None
     issued: int = 0
     acked: int = 0
     outstanding_epoch: int | None = None
@@ -59,6 +61,7 @@ class TargetGrantRuntime:
         draft_bs: int,
         draft_ctx_bucket: str,
         predicted_slack_us: float,
+        slack_source: str = "target_forward",
     ) -> None:
         if desired_q < 1:
             raise ValueError("desired_q must be positive")
@@ -70,6 +73,7 @@ class TargetGrantRuntime:
             draft_bs=int(draft_bs),
             draft_ctx_bucket=str(draft_ctx_bucket),
             predicted_slack_us=max(float(predicted_slack_us), 0.0),
+            slack_source=str(slack_source),
         )
 
     def _next_epoch(self, request_id: str) -> int:
@@ -86,11 +90,25 @@ class TargetGrantRuntime:
     ) -> SpectreRequest | None:
         if state.outstanding_epoch is not None or state.issued >= state.desired_q:
             return None
+        now_us = time.monotonic_ns() // 1000
+        available_slack_us = state.predicted_slack_us
+        if not target_waiting:
+            if state.overlap_window_end_us is None:
+                state.overlap_window_end_us = now_us + int(state.predicted_slack_us)
+            available_slack_us = max(state.overlap_window_end_us - now_us, 0.0)
+        remaining_tokens = max(state.desired_q - state.issued, 1)
+        decision_slack_us = available_slack_us
+        if not target_waiting and state.slack_source == "history_h2d":
+            # PCIe-Slack is admitted only when the measured window can hold the
+            # complete next-round SPECTRE sequence, not merely its first token.
+            # Re-evaluate after each ACK using the remaining absolute window.
+            decision_slack_us = available_slack_us / remaining_tokens
         decision = self.controller.decide(
             target_shape=state.target_shape,
             draft_bs=state.draft_bs,
             draft_ctx_bucket=state.draft_ctx_bucket,
-            predicted_slack_us=state.predicted_slack_us,
+            predicted_slack_us=decision_slack_us,
+            slack_source=state.slack_source,
             target_waiting=target_waiting,
             deadline_us=deadline_us,
         )
@@ -106,13 +124,29 @@ class TargetGrantRuntime:
                 and self.controller.calibration_allow_overlap
             )
         ):
-            # A measured overlap grant is valid only inside the predicted
-            # Target phase.  Expiry is checked again by the Drafter directly
-            # before launch, so a delayed ZMQ message fails closed.
-            usable_slack_us = max(
-                state.predicted_slack_us - self.controller.guard_us, 1.0
+            # A measured grant's deadline is the latest safe *launch* time,
+            # not the end of the predicted window.  This lets ACK-driven
+            # one-token grants pipeline the next SPECTRE candidate sequence
+            # while Target verifies the current sequence, without restarting
+            # the slack budget after every ACK.
+            entry = decision.profile_entry
+            if entry is None or state.overlap_window_end_us is None:
+                state.last_decision = GrantDecision(
+                    GrantState.TARGET_EXCLUSIVE, "missing_overlap_profile_entry"
+                )
+                return None
+            quantum_us = entry.draft_step_ms * 1000.0 + self.controller.guard_us
+            reserved_quanta = (
+                remaining_tokens if state.slack_source == "history_h2d" else 1
             )
-            effective_deadline_us = time.monotonic_ns() // 1000 + int(usable_slack_us)
+            effective_deadline_us = int(
+                state.overlap_window_end_us - reserved_quanta * quantum_us
+            )
+            if effective_deadline_us <= now_us:
+                state.last_decision = GrantDecision(
+                    GrantState.TARGET_EXCLUSIVE, "overlap_window_exhausted"
+                )
+                return None
         # Calibration overlap is an explicit fixed-quota experiment rather
         # than an online slack decision.  In particular, the first measured
         # round has no slack history and therefore predicts zero microseconds.
@@ -169,6 +203,23 @@ class TargetGrantRuntime:
                 entry = state.last_decision.profile_entry
                 if entry is not None and entry.target_baseline_ms > 0:
                     self._active_overlap_baselines_ms.append(entry.target_baseline_ms)
+        return messages
+
+    def overlap_grants(self, keys: list[tuple[str, int]]) -> list[SpectreRequest]:
+        """Issue the next ACK-gated token while Target forward is still active."""
+
+        messages = []
+        for key in keys:
+            state = self._rounds.get(key)
+            if state is None or state.spec_cnt <= 0:
+                continue
+            message = self._issue(
+                state,
+                target_waiting=False,
+                deadline_us=None,
+            )
+            if message is not None:
+                messages.append(message)
         return messages
 
     def record_target_forward(self, elapsed_ms: float) -> None:

@@ -273,3 +273,14 @@ sgl-kernel/csrc/**/*_musa/
 *.glb
 *.ply
 *.npz
+specstream_prepared/longbench_v2.jsonl
+specstream_prepared/longbench_v2.jsonl
+specstream_prepared/longbench_v2_qwen25_7b_32k.jsonl
+specstream_prepared/public_e2e/longbench_v2_perf_sharegpt.json
+
+# SpecStream local evaluation datasets
+specstream_prepared/longbench_v2.jsonl
+specstream_prepared/longbench_v2_qwen25_7b_32k.jsonl
+specstream_prepared/sharegpt_v3_merged.json
+specstream_prepared/public_e2e/longbench_v2_perf_sharegpt.json
+specstream_prepared/sharegpt_v3_merged.json

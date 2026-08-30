@@ -63,3 +63,31 @@ def test_old_profile_can_infer_batch_size_from_request_ids():
         draft_bs=3,
         draft_ctx_bucket="16k",
     )
+
+
+def test_history_h2d_calibration_filters_out_other_target_phases():
+    row = {
+        "q": "4",
+        "batch_size": "1",
+        "context_tokens": "8192",
+        "target_phase": "history_h2d",
+        "history_len": "4096",
+        "h2d_ops": "8",
+        "exposed_copy_ms": "1.25",
+        "draft_tpc_low": "0",
+        "draft_tpc_high": "4",
+    }
+    kwargs = {
+        "target_shape": "verify_bs1_q4_ctx8k",
+        "draft_bs": 1,
+        "draft_ctx_bucket": "8k",
+        "draft_tpcs": 4,
+        "target_phase": "history_h2d",
+    }
+    assert MODULE.row_matches_shape(row, **kwargs)
+    row["target_phase"] = "target_forward"
+    assert not MODULE.row_matches_shape(row, **kwargs)
+
+    row["target_phase"] = "history_h2d"
+    row["exposed_copy_ms"] = "0"
+    assert not MODULE.row_matches_shape(row, **kwargs)

@@ -167,6 +167,6 @@ class Qwen3ASRProcessor(ProcessorMixin):
         return inputs
 
 
-AutoConfig.register("qwen3_asr", Qwen3ASRConfig)
-AutoConfig.register("qwen3_asr_thinker", Qwen3ASRThinkerConfig)
+AutoConfig.register("qwen3_asr", Qwen3ASRConfig, exist_ok=True)
+AutoConfig.register("qwen3_asr_thinker", Qwen3ASRThinkerConfig, exist_ok=True)
 register_customized_processor(Qwen3ASRProcessor)(Qwen3ASRConfig)

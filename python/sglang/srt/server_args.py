@@ -559,6 +559,7 @@ class ServerArgs:
     specstream_coexec_pending_high_watermark: int = 16
     specstream_coexec_compute_ratio_threshold: float = 0.90
     specstream_coexec_require_mps: bool = False
+    specstream_pcie_slack_coexec: bool = False
     specstream_smctrl_enabled: bool = False
     specstream_grant_token_quantum: int = 1
     specstream_coexec_target_slowdown_budget: float = 0.05
@@ -3139,6 +3140,7 @@ class ServerArgs:
         if (
             self.specstream_enabled
             or self.specstream_profile_only
+            or self.specstream_pcie_slack_coexec
             or (self.specstream_smctrl_enabled and self.spectre_role == "target")
         ):
             from sglang.srt.speculative.spectre.specstream.config import (
@@ -5450,6 +5452,16 @@ class ServerArgs:
             help=(
                 "Compatibility check only: require an MPS environment for the "
                 "two CUDA processes. MPS percentage is not a scheduling input."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-pcie-slack-coexec",
+            action="store_true",
+            default=ServerArgs.specstream_pcie_slack_coexec,
+            help=(
+                "Restrict initial colocated Draft grants to measured, exposed "
+                "SpecStream History H2D windows. Requires tiered KV, SM control "
+                "and MPS, plus a history_h2d-calibrated resource profile."
             ),
         )
         parser.add_argument(

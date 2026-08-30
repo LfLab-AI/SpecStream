@@ -332,21 +332,30 @@ class SchedulerSpectreTargetMixin:
             except RuntimeError:
                 return False
 
-        def pump_waiting_grants() -> None:
-            if runtime is None or not pending_rids or not target_forward_complete():
+        def pump_grants() -> None:
+            if runtime is None or not pending_rids:
                 return
             keys = [key for key in grant_keys if key[0] in pending_rids]
-            grant_messages = runtime.waiting_grants(keys, deadline_us=grant_deadline_us)
+            if target_forward_complete():
+                grant_messages = runtime.waiting_grants(
+                    keys, deadline_us=grant_deadline_us
+                )
+            else:
+                # Preserve SPECTRE's pipeline: while Target verifies round n,
+                # every ACK can unlock one more token for round n+1.  The
+                # runtime reuses the original absolute PCIe-slack window, so
+                # ACKs never restart or extend the overlap budget.
+                grant_messages = runtime.overlap_grants(keys)
             if grant_messages:
                 self._zmq_send(grant_messages)
 
-        # DRAFT_CATCHUP is issued only after the asynchronous Target CUDA
-        # forward has completed.  Before that point, only an offline-approved
-        # SLACK_FILL grant sent at round start may execute.
-        pump_waiting_grants()
+        # SLACK_FILL advances the next-round Draft sequence while asynchronous
+        # Target verification is active.  DRAFT_CATCHUP begins only after the
+        # Target CUDA event completes.
+        pump_grants()
 
         while pending_rids:
-            pump_waiting_grants()
+            pump_grants()
             msgs = self._drain_msg_buffer()
             if msgs:
                 all_messages.extend(msgs)
@@ -364,7 +373,7 @@ class SchedulerSpectreTargetMixin:
                         pending_rids.discard(msg.request_id)
                 if not pending_rids:
                     break
-                pump_waiting_grants()
+                pump_grants()
 
             remaining = deadline - time.perf_counter()
             if remaining <= 0:

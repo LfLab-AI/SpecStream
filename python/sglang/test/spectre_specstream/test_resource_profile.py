@@ -59,6 +59,21 @@ def test_unobserved_shape_never_interpolates():
     )
 
 
+def test_slack_source_never_reuses_a_different_calibration_phase():
+    assert (
+        _profile().select_safe(
+            target_shape="verify_bs8_q5_ctx16k",
+            draft_bs=8,
+            draft_ctx_bucket="16k",
+            slowdown_budget=0.05,
+            slack_us=1500,
+            guard_us=200,
+            slack_source="history_h2d",
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     ("draft_bs", "draft_ctx_bucket"),
     ((4, "16k"), (8, "32k")),

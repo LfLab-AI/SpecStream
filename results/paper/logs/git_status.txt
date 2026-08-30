@@ -1,0 +1,46 @@
+ M python/sglang/srt/configs/qwen3_asr.py
+ M python/sglang/srt/server_args.py
+ M python/sglang/srt/speculative/spectre/specstream/coexec_runtime.py
+ M python/sglang/srt/speculative/spectre/specstream/config.py
+ M python/sglang/srt/speculative/spectre/specstream/gpu_grant_controller.py
+ M python/sglang/srt/speculative/spectre/specstream/profiler.py
+ M python/sglang/srt/speculative/spectre/specstream/resource_profile.py
+ M python/sglang/srt/speculative/spectre/specstream/verifier.py
+ M python/sglang/srt/speculative/spectre/verifier/spectre_target_scheduler_mixin.py
+ M python/sglang/test/spectre_specstream/test_coexec_runtime.py
+ M python/sglang/test/spectre_specstream/test_control_profile.py
+ M python/sglang/test/spectre_specstream/test_gpu_grant_controller.py
+ M python/sglang/test/spectre_specstream/test_interference_sample_filter.py
+ M python/sglang/test/spectre_specstream/test_resource_profile.py
+ D results/fast_i1_20260827_165250/logs/git_commit.txt
+ D results/fast_i1_20260827_165250/logs/git_status.txt
+ D results/fast_i1_20260827_165250/logs/gpu_inventory.txt
+ D results/fast_i1_20260827_165250/logs/nvidia_smi.txt
+ D results/fast_i1_20260827_165250/logs/pytest_specstream.txt
+ D results/fast_i1_20260827_165250/logs/server_help.txt
+ D results/fast_i1_20260827_165250/logs/sglang_path.txt
+ D results/fast_i1_20260827_165250/source_data/target_kv_geometry.txt
+ D results/fast_i1_20260827_170124/logs/git_commit.txt
+ D results/fast_i1_20260827_170124/logs/git_status.txt
+ D results/fast_i1_20260827_170124/logs/gpu_inventory.txt
+ D results/fast_i1_20260827_170124/logs/nvidia_smi.txt
+ D results/fast_i1_20260827_170124/logs/sglang_path.txt
+ D results/innovation2_step1/profile_summary.tsv
+ M scripts/specstream/run_dedicated_draft_target_baseline.sh
+ M scripts/specstream/smctrl/build_resource_profile.py
+ M scripts/specstream/smctrl/extract_interference_sample.py
+?? .specstream_backups/
+?? gradS5.sh
+?? grid.sh
+?? python/sglang/test/spectre_specstream/test_same_gpu_launcher.py
+?? results/i1_paper_20260828_104632/
+?? results/i1_paper_20260828_144658/
+?? results/paper/
+?? results/public_e2e_20260828_201921/
+?? results/specstream_pcie_slack_isolated/
+?? scripts/specstream/paper_eval/
+?? scripts/specstream/run_dedicated_draft_target_baseline.sh.before_paper_eval
+?? scripts/specstream/run_dedicated_draft_target_baseline.sh.before_public_e2e
+?? scripts/specstream/run_qwen25_7b_05b_same_gpu.sh
+?? source2.sh
+?? specstream_prepared/public_e2e/
