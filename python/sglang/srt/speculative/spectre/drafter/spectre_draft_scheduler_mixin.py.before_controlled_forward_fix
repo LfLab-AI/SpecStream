@@ -386,16 +386,8 @@ class SpectreDraftSchedulerMixin:
         runnable_reqs = list(self.draft_batch.reqs)
         started = time.perf_counter()
         self.draft_batch.prepare_for_decode()
-
-        # Mark this CUDA forward as Target-grant-controlled so TpModelWorker
-        # enforces the fail-closed TPC-mask invariant.
-        self._specstream_begin_controlled_forward()
-        try:
-            result = self.run_batch(self.draft_batch)
-            self._synchronize_specstream_draft_stream()
-        finally:
-            self._specstream_end_controlled_forward()
-
+        result = self.run_batch(self.draft_batch)
+        self._synchronize_specstream_draft_stream()
         elapsed_ms = (time.perf_counter() - started) * 1000.0
 
         for req in runnable_reqs:
