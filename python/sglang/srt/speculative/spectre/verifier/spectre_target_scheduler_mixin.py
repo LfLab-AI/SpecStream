@@ -5,6 +5,8 @@ import time
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
+import torch
+
 from sglang.srt.environ import envs
 from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
@@ -20,6 +22,9 @@ from sglang.srt.speculative.spectre.spectre_protocol import (
 from sglang.srt.speculative.spectre.spectre_protocol import (
     is_health_check_req as _is_health_check,
 )
+from sglang.srt.speculative.spectre.specstream.background_grant_pump import (
+    BackgroundGrantPump,
+)
 from sglang.srt.utils import DynamicGradMode, broadcast_pyobj
 
 logger = logging.getLogger(__name__)
@@ -27,6 +32,37 @@ logger = logging.getLogger(__name__)
 
 def _spectre_now_us() -> float:
     return time.time() * 1e6
+
+
+def _draft_needs_full_context(req: Req, *, is_half_open: bool = False) -> bool:
+    """Return whether this round must bootstrap or repair Drafter state.
+
+    ``spec_cnt`` is a wire round identifier, not proof that the remote Drafter
+    has state. It can advance during q=1 fallback rounds even when no remote
+    request was sent, so successful bootstrap must be tracked explicitly.
+    """
+
+    return bool(
+        is_half_open
+        or int(getattr(req, "spec_cnt", 0) or 0) <= 0
+        or not bool(getattr(req, "spectre_draft_initialized", False))
+        or bool(getattr(req, "spectre_force_full_draft_context", False))
+    )
+
+
+def _mark_draft_context_pending(req: Req, needs_full_context: bool) -> None:
+    req.spectre_full_context_pending = bool(needs_full_context)
+
+
+def _mark_draft_context_synced(req: Req) -> None:
+    req.spectre_draft_initialized = True
+    req.spectre_force_full_draft_context = False
+    req.spectre_full_context_pending = False
+
+
+def _mark_draft_context_unsynced(req: Req) -> None:
+    req.spectre_force_full_draft_context = True
+    req.spectre_full_context_pending = False
 
 
 class DraftCircuitBreaker:
@@ -162,7 +198,7 @@ class SchedulerSpectreTargetMixin:
                     if msgs:
                         with self._msg_lock:
                             self._msg_buffer.extend(msgs)
-                        self._data_ready.set()
+                            self._data_ready.set()
                     else:
                         time.sleep(0.0005)
                 else:
@@ -175,24 +211,158 @@ class SchedulerSpectreTargetMixin:
         with self._msg_lock:
             msgs = list(self._msg_buffer)
             self._msg_buffer.clear()
-        self._data_ready.clear()
+            self._data_ready.clear()
         return msgs
 
+    def _drain_grant_acks_during_forward(self, keys):
+        """Extract only ACKs; leave Draft/REJECT/context messages for TP receive."""
+        acknowledgements = []
+        completed = set()
+        with self._msg_lock:
+            retained = []
+            for msg in self._msg_buffer:
+                if msg.action == SpectreAction.GRANT_ACK:
+                    acknowledgements.append(msg)
+                    continue
+                retained.append(msg)
+                if msg.action == SpectreAction.REJECT:
+                    completed.update(keys)
+                elif msg.action in (SpectreAction.DRAFT, SpectreAction.NEED_CONTEXT):
+                    key = (str(msg.request_id), int(msg.spec_cnt or 0))
+                    if key in keys:
+                        completed.add(key)
+            self._msg_buffer[:] = retained
+            if not retained:
+                self._data_ready.clear()
+        return acknowledgements, completed
+
+    def _harvest_buffered_grant_acks(self) -> int:
+        """Account for late ACKs even after the last Draft response/request.
+
+        The receiver thread remains the sole communicator reader. The main
+        scheduler only removes ACKs from its protected message buffer; complete
+        Draft/control messages still follow the normal TP receive path. Runtime
+        records terminal ACKs even if their request state has already retired.
+        """
+        if self.tp_rank != 0 or not hasattr(self, "_msg_buffer"):
+            return 0
+        runtime = self._get_specstream_runtime()
+        if runtime is None:
+            return 0
+        acknowledgements, _ = self._drain_grant_acks_during_forward(())
+        for ack in acknowledgements:
+            runtime.acknowledge_grant(ack)
+        return len(acknowledgements)
+
+    def start_specstream_grant_pump(self, batch: ScheduleBatch):
+        """Advance bounded overlap grants while Target is still submitting layers.
+
+        All TP broadcasts and complete Draft consumption stay on the scheduler
+        thread. Runtime methods serialize grant state; send_objs only enqueues
+        to the C++ communicator's mutex-protected outbound queue.
+        """
+        runtime = self._get_specstream_runtime()
+        if (
+            runtime is None
+            or runtime.grant_runtime is None
+            or (self.tp_rank != 0 and getattr(runtime, "tp_window_mailbox", None) is None)
+            or getattr(batch, "specstream_mode", "parallel") != "parallel"
+            or os.environ.get("SPECSTREAM_BACKGROUND_GRANT_PUMP", "1") == "0"
+        ):
+            return None
+        if runtime.config.pcie_slack_coexec and not bool(
+            getattr(getattr(batch, "specstream_meta", None), "enabled", False)
+        ):
+            # No CPU History means no physical H2D grant window to observe.
+            # Avoid a thread launch on the short-context/native GPU fast path.
+            return None
+        if self.tp_rank != 0:
+            device = runtime.staging.device
+            device_index = device.index if device.index is not None else torch.cuda.current_device()
+
+            def publish_window():
+                runtime.tp_window_mailbox.publish(
+                    runtime.staging.observe_h2d_window(runtime._round_id)
+                )
+                return True
+
+            return BackgroundGrantPump(
+                publish_window,
+                initialize=lambda: torch.cuda.set_device(device_index),
+                finalize=runtime.tp_window_mailbox.clear,
+            ).start()
+        keys = {
+            (str(req.rid), int(req.spec_cnt))
+            for req in self._get_reqs_waiting_for_drafts(batch)
+            if req.spec_cnt in self.req_to_draft_token.get(req.rid, {})
+            and self.req_to_draft_token[req.rid][req.spec_cnt] is None
+        }
+        if not keys:
+            return None
+        pending = set(keys)
+        device = runtime.staging.device
+        # Staging can use an unindexed torch.device("cuda"). Resolve it on
+        # the scheduler thread: a new thread may start on a different device,
+        # and set_device() rejects CUDA devices without an explicit index.
+        device_index = (
+            device.index if device.index is not None else torch.cuda.current_device()
+        )
+
+        def initialize():
+            torch.cuda.set_device(device_index)
+
+        def step():
+            acknowledgements, completed = self._drain_grant_acks_during_forward(pending)
+            for ack in acknowledgements:
+                runtime.acknowledge_grant(ack)
+            pending.difference_update(completed)
+            if not pending:
+                return False
+            grants = runtime.overlap_grants(tuple(pending))
+            if grants:
+                self._zmq_send(grants)
+            return True
+
+        return BackgroundGrantPump(step, initialize=initialize).start()
+
     def reset_spectre_target_state(self) -> None:
+        # Account for already received dispositions before retiring runtime
+        # state. ACKs arriving while clear() waits for pending seals are kept
+        # below and harvested by the next (possibly idle) scheduler iteration.
+        self._harvest_buffered_grant_acks()
         self._spectre_flush_at_us = _spectre_now_us()
         self._accept_reject_messages = False
+
+        # flush_cache() clears the generic request/token pools immediately
+        # after this hook. SpecStream must retire pending D2H work and forget
+        # GPU-History page-table ownership first.
+        runtime = self._get_specstream_runtime()
+        if runtime is not None:
+            runtime.clear()
 
         if hasattr(self, "req_to_draft_token"):
             self.req_to_draft_token.clear()
 
         if hasattr(self, "_msg_buffer"):
+
+            def clear_data_preserving_acks():
+                self._msg_buffer[:] = [
+                    msg
+                    for msg in self._msg_buffer
+                    if msg.action == SpectreAction.GRANT_ACK
+                ]
+                if hasattr(self, "_data_ready"):
+                    if self._msg_buffer:
+                        self._data_ready.set()
+                    else:
+                        self._data_ready.clear()
+
             if hasattr(self, "_msg_lock"):
                 with self._msg_lock:
-                    self._msg_buffer.clear()
+                    clear_data_preserving_acks()
             else:
-                self._msg_buffer.clear()
-
-        if hasattr(self, "_data_ready"):
+                clear_data_preserving_acks()
+        elif hasattr(self, "_data_ready"):
             self._data_ready.clear()
 
         if hasattr(self, "draft_circuit_breaker"):
@@ -232,6 +402,10 @@ class SchedulerSpectreTargetMixin:
         self._init_draft_recv_infra()
 
         while True:
+            # _collect_draft_messages stops when its final DRAFT arrives. Its
+            # ACK can arrive later, when there is no subsequent receive call.
+            # Drain here before idle/paused branches and before any cache flush.
+            self._harvest_buffered_grant_acks()
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
             if self._engine_paused:
@@ -300,12 +474,19 @@ class SchedulerSpectreTargetMixin:
         batch.spectre_fallback_reason = str(reason)
 
     def _consume_request_timeout_fallback(self, batch: ScheduleBatch) -> bool:
-        forced = False
-        for req in batch.reqs:
+        reqs = [req for req in batch.reqs if not _is_health_check(req)]
+        forced_count = 0
+        for req in reqs:
             if getattr(req, "spectre_force_normal_decode", False):
-                forced = True
+                forced_count += 1
                 req.spectre_force_normal_decode = False
-        return forced
+        if not reqs:
+            return False
+        # One delayed RID must not downgrade every ready request. Keep the
+        # uniform q=1 safety round only when the missing share exceeds the same
+        # policy threshold used by ready-horizon selection.
+        threshold = float(self.server_args.spectre_no_draft_ratio)
+        return forced_count / len(reqs) > threshold
 
     def _collect_draft_messages(
         self,
@@ -364,6 +545,13 @@ class SchedulerSpectreTargetMixin:
                         if runtime is not None:
                             runtime.acknowledge_grant(msg)
                         continue
+                    if msg.action == SpectreAction.NEED_CONTEXT:
+                        if msg.request_id not in pending_rids:
+                            continue
+                        expected_sc = pending_spec_cnts.get(msg.request_id)
+                        if expected_sc is None or msg.spec_cnt == expected_sc:
+                            pending_rids.discard(msg.request_id)
+                        continue
                     if msg.action != SpectreAction.DRAFT:
                         continue
                     if msg.request_id not in pending_rids:
@@ -383,8 +571,14 @@ class SchedulerSpectreTargetMixin:
                         f"{list(pending_rids)} \033[0m"
                     )
                 break
+            # GPU completion can flip after pump_grants() observed an active
+            # forward. Sleeping the full receive timeout on a second query
+            # would leave DRAFT_CATCHUP unissued until its deadline expires.
+            # Keep progress bounded whenever this receiver owns grant issuance.
             wait_timeout = (
-                remaining if target_forward_complete() else min(remaining, 0.001)
+                min(remaining, 0.001)
+                if runtime is not None and runtime.grant_runtime is not None
+                else remaining if target_forward_complete() else min(remaining, 0.001)
             )
             self._data_ready.wait(timeout=wait_timeout)
 
@@ -476,7 +670,11 @@ class SchedulerSpectreTargetMixin:
         batch.spectre_draft_timeout = False
         batch.spectre_missing_draft_rids = []
         reqs_waiting_for_drafts = self._get_reqs_waiting_for_drafts(batch)
-        is_initial_round = any(req.spec_cnt <= 0 for req in reqs_waiting_for_drafts)
+        is_initial_round = any(
+            req.spec_cnt <= 0
+            or bool(getattr(req, "spectre_full_context_pending", False))
+            for req in reqs_waiting_for_drafts
+        )
         timeout_s = (
             self._initial_recv_timeout_s if is_initial_round else self._recv_timeout_s
         )
@@ -510,9 +708,15 @@ class SchedulerSpectreTargetMixin:
 
         messages = self._tp_broadcast_messages(messages)
 
-        self._store_messages(messages)
-        recv_now_us = _spectre_now_us()
         waiting_keys = {(req.rid, req.spec_cnt) for req in reqs_waiting_for_drafts}
+        self._store_messages(messages)
+        resync_rids = {
+            str(msg.request_id)
+            for msg in messages
+            if msg.action == SpectreAction.NEED_CONTEXT
+            and (msg.request_id, msg.spec_cnt) in waiting_keys
+        }
+        recv_now_us = _spectre_now_us()
         delivered_rtt_ms = [
             max(0.0, (recv_now_us - float(msg.target_send_time)) / 1000.0)
             for msg in messages
@@ -521,9 +725,23 @@ class SchedulerSpectreTargetMixin:
             and msg.target_send_time is not None
             and msg.target_send_time > 0.0
         ]
+        requested_q = int(
+            getattr(
+                batch,
+                "spectre_requested_q",
+                getattr(batch, "draft_num_tokens", 1),
+            )
+            or 1
+        )
 
         result = self._build_result_from_cache(reqs_waiting_for_drafts)
+        for req in reqs_waiting_for_drafts:
+            if req.rid in result:
+                _mark_draft_context_synced(req)
+            elif req.rid in resync_rids:
+                _mark_draft_context_unsynced(req)
         missing_reqs: List[Req] = []
+        timed_out_reqs: List[Req] = []
         fail_fast_message: Optional[str] = None
         if reqs_waiting_for_drafts:
             missing_reqs = [
@@ -532,19 +750,24 @@ class SchedulerSpectreTargetMixin:
             if not missing_reqs:
                 self.draft_circuit_breaker.record_success()
             else:
-                self.draft_circuit_breaker.record_failure()
-                requested_q = int(
-                    getattr(
-                        batch,
-                        "spectre_requested_q",
-                        getattr(batch, "draft_num_tokens", 1),
-                    )
-                    or 1
-                )
+                timed_out_reqs = [
+                    req for req in missing_reqs if req.rid not in resync_rids
+                ]
+                # NEED_CONTEXT proves that Drafter is responsive. A partial
+                # response is likewise not a process-wide outage and must not
+                # open the global circuit breaker.
+                if timed_out_reqs and len(timed_out_reqs) == len(
+                    reqs_waiting_for_drafts
+                ):
+                    self.draft_circuit_breaker.record_failure()
+                else:
+                    self.draft_circuit_breaker.record_success()
                 missing = [req.rid for req in missing_reqs]
-                batch.spectre_draft_timeout = True
+                batch.spectre_draft_timeout = bool(timed_out_reqs)
                 batch.spectre_missing_draft_rids = missing
-                batch.spectre_fallback_reason = "remote_draft_timeout"
+                batch.spectre_fallback_reason = (
+                    "remote_draft_timeout" if timed_out_reqs else "remote_draft_resync"
+                )
                 if self.tp_size == 1 or self.tp_rank == 0:
                     runtime = self._get_specstream_runtime()
                     if runtime is not None:
@@ -554,45 +777,60 @@ class SchedulerSpectreTargetMixin:
                         if pause_messages:
                             self._zmq_send(pause_messages)
                 for req in missing_reqs:
+                    req.spectre_full_context_pending = False
+                    if req.rid in resync_rids or not bool(
+                        getattr(req, "spectre_draft_initialized", False)
+                    ):
+                        _mark_draft_context_unsynced(req)
                     # Ordinary mode consumes this marker in the current worker
                     # call. Parallel/extend mode consumes it on the next batch.
-                    req.spectre_force_normal_decode = True
+                    # A responsive resync request can recover directly on the
+                    # next q>1 round without downgrading unrelated requests.
+                    req.spectre_force_normal_decode = req.rid not in resync_rids
                 if self.tp_rank == 0:
                     logger.warning(
-                        "[Target][DraftFallback] q=%d missing=%d/%d after "
-                        "%.0f ms; using a batch-uniform q=1 round; rids=%s",
+                        "[Target][DraftFallback] q=%d missing=%d/%d resync=%d "
+                        "after %.0f ms; rids=%s",
                         requested_q,
                         len(missing_reqs),
                         len(reqs_waiting_for_drafts),
+                        len(resync_rids),
                         timeout_s * 1000,
                         missing,
                     )
-                if requested_q > 1 and should_fail_fast_on_draft_timeout(
-                    require_draft=self.server_args.spectre_require_draft,
-                    timeout_action=self.server_args.spectre_draft_timeout_action,
+                if (
+                    timed_out_reqs
+                    and requested_q > 1
+                    and should_fail_fast_on_draft_timeout(
+                        require_draft=self.server_args.spectre_require_draft,
+                        timeout_action=self.server_args.spectre_draft_timeout_action,
+                    )
                 ):
                     fail_fast_message = (
                         "SPECTRE required a remote draft for q="
                         f"{requested_q}, but no valid response arrived within "
-                        f"{timeout_s * 1000:.0f} ms; missing_rids={missing}. "
+                        f"{timeout_s * 1000:.0f} ms; "
+                        f"missing_rids={[req.rid for req in timed_out_reqs]}. "
                         "Check Drafter readiness/ZMQ and increase "
                         "--spectre-recv-timeout-ms or "
                         "--spectre-initial-recv-timeout-ms."
                     )
         elapsed_ms = (time.perf_counter() - specstream_started) * 1000
+        observed_rtt_ms = max(
+            max(delivered_rtt_ms, default=elapsed_ms),
+            timeout_s * 1000 if timed_out_reqs else 0.0,
+        )
         runtime = self._get_specstream_runtime()
         if runtime is not None:
             runtime.record_network_wait(elapsed_ms)
             runtime.record_draft_result(
+                q=requested_q,
                 elapsed_ms=elapsed_ms,
-                rtt_ms=(
-                    max(
-                        max(delivered_rtt_ms, default=elapsed_ms),
-                        timeout_s * 1000 if missing_reqs else 0.0,
-                    )
-                ),
+                rtt_ms=observed_rtt_ms,
                 timeout_ms=timeout_s * 1000,
-                missing_count=len(missing_reqs),
+                # A NEED_CONTEXT response is a fast protocol repair, not a
+                # timeout sample, and must not poison adaptive backoff.
+                missing_count=sum(req.rid not in resync_rids for req in missing_reqs),
                 total_count=len(reqs_waiting_for_drafts),
             )
         if fail_fast_message is not None:
@@ -632,6 +870,16 @@ class SchedulerSpectreTargetMixin:
 
         self._store_messages(messages)
         result = self._build_result_from_cache(failed_reqs)
+        retry_resync_rids = {
+            str(msg.request_id)
+            for msg in messages
+            if msg.action == SpectreAction.NEED_CONTEXT
+        }
+        for req in failed_reqs:
+            if req.rid in result:
+                _mark_draft_context_synced(req)
+            elif req.rid in retry_resync_rids:
+                _mark_draft_context_unsynced(req)
         return result
 
     def send_batch_draft_requests(
@@ -668,7 +916,10 @@ class SchedulerSpectreTargetMixin:
                     self.draft_circuit_breaker.state == DraftCircuitBreaker.HALF_OPEN
                 )
                 for req in reqs_to_send:
-                    needs_full_context = req.spec_cnt == 0 or is_half_open
+                    needs_full_context = _draft_needs_full_context(
+                        req, is_half_open=is_half_open
+                    )
+                    _mark_draft_context_pending(req, needs_full_context)
                     draft_reqs.append(
                         SpectreRequest(
                             request_id=req.rid,
@@ -700,7 +951,10 @@ class SchedulerSpectreTargetMixin:
                         draft_reqs + grant_reqs,
                         wait_for_identity_s=(
                             self._initial_recv_timeout_s
-                            if any(req.spec_cnt <= 0 for req in reqs_to_send)
+                            if any(
+                                getattr(req, "spectre_full_context_pending", False)
+                                for req in reqs_to_send
+                            )
                             else 0.0
                         ),
                     )
@@ -712,19 +966,27 @@ class SchedulerSpectreTargetMixin:
             hasattr(self, "zmq_communicator") and self.zmq_communicator is not None
         ):
             return
-        reqs_to_send = [
-            SpectreRequest(
-                request_id=req.rid,
-                spec_cnt=req.spec_cnt,
-                action=SpectreAction.DRAFT,
-                spec_type=SpecType.DRAFT_REQUEST,
-                output_ids=req.output_ids,
-                draft_token_ids=[],
-                num_draft_tokens=num_draft_tokens,
+        reqs_to_send = []
+        for req in failed_reqs:
+            if _is_health_check(req):
+                continue
+            needs_full_context = _draft_needs_full_context(req)
+            _mark_draft_context_pending(req, needs_full_context)
+            reqs_to_send.append(
+                SpectreRequest(
+                    request_id=req.rid,
+                    spec_cnt=req.spec_cnt,
+                    action=SpectreAction.DRAFT,
+                    spec_type=SpecType.DRAFT_REQUEST,
+                    input_ids=(req.origin_input_ids if needs_full_context else None),
+                    output_ids=req.output_ids,
+                    draft_token_ids=(req.cur_drafts if not needs_full_context else []),
+                    num_draft_tokens=num_draft_tokens,
+                    sampling_params=(
+                        req.sampling_params if needs_full_context else None
+                    ),
+                )
             )
-            for req in failed_reqs
-            if not _is_health_check(req)
-        ]
         if reqs_to_send:
             runtime = self._get_specstream_runtime()
             grant_reqs = (
@@ -821,19 +1083,46 @@ class SchedulerSpectreTargetMixin:
             return 1
         runtime = self._get_specstream_runtime()
         if runtime is not None and runtime.controller is not None:
-            if runtime.should_sync_tp_profile():
+            # Local samples can differ while asynchronous seals/timing retire.
+            # Every rank must receive the same gate before any conditional
+            # collective, or one can all-gather while another broadcasts q.
+            sync_tp_profile = (
+                bool(runtime.should_sync_tp_profile()) if self.tp_rank == 0 else False
+            )
+            if self.tp_size > 1:
+                sync_payload = broadcast_pyobj(
+                    [sync_tp_profile] if self.tp_rank == 0 else [],
+                    self.tp_group.rank,
+                    self.tp_cpu_group,
+                    src=self.tp_group.ranks[0],
+                )
+                if len(sync_payload) != 1 or type(sync_payload[0]) is not bool:
+                    raise RuntimeError(
+                        "TP profile sync broadcast returned an invalid gate"
+                    )
+                sync_tp_profile = sync_payload[0]
+            if sync_tp_profile:
                 samples = self.tp_group.all_gather_object(
                     runtime.local_tp_rank_sample()
                 )
                 runtime.record_tp_rank_samples(samples)
             decision = runtime.choose_decision(batch) if self.tp_rank == 0 else None
             if self.tp_size > 1:
-                decision = broadcast_pyobj(
-                    decision,
+                # broadcast_pyobj serializes a list payload.  Passing the
+                # dataclass directly works in TP=1 (where no broadcast is
+                # needed) but crashes TP>1 dynamic-q on the source rank when
+                # broadcast_pyobj calls len(data).
+                decision_payload = broadcast_pyobj(
+                    [decision] if self.tp_rank == 0 else [],
                     self.tp_group.rank,
                     self.tp_cpu_group,
                     src=self.tp_group.ranks[0],
                 )
+                if len(decision_payload) != 1 or decision_payload[0] is None:
+                    raise RuntimeError(
+                        "TP dynamic-q broadcast returned an invalid decision payload"
+                    )
+                decision = decision_payload[0]
             runtime.record_decision(decision)
             batch.specstream_decision = decision
             batch.specstream_mode = decision.mode

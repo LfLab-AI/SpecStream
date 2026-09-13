@@ -48,6 +48,8 @@ class SpectreAction(Enum):
     grant: one Target-authorized Draft token step (T->D)
     pause: revoke the active Draft execution grant (T->D)
     grant_ack: one granted token step completed (D->T)
+    need_context: Drafter has no state for an incremental request and asks the
+        Target to resend the complete request context (D->T)
     """
 
     DRAFT = "draft"
@@ -57,6 +59,7 @@ class SpectreAction(Enum):
     GRANT = "grant"
     PAUSE = "pause"
     GRANT_ACK = "grant_ack"
+    NEED_CONTEXT = "need_context"
 
 
 class SpecType(Enum):

@@ -748,6 +748,20 @@ class PrefillAdder:
         if (x := self.prefill_max_requests) is not None and len(self.can_run_list) >= x:
             return AddReqResult.OTHER
 
+        pressure_admission = getattr(
+            self.token_to_kv_pool_allocator, "_specstream_pressure_admission", None
+        )
+        if callable(pressure_admission):
+            # Reclaim before the normal capacity checks and batch construction,
+            # otherwise a full GPU cache would cause queueing forever without
+            # ever reaching the allocator's eviction hook.
+            future = min(max(req.sampling_params.max_new_tokens - len(req.output_ids), 0),
+                         CLIP_MAX_NEW_TOKENS)
+            required = int(self.ceil_paged_tokens(req.extend_input_len) + future
+                           + max(self.rem_total_token_offset, self.cur_rem_token_offset) + 1)
+            if self.token_to_kv_pool_allocator.available_size() < required:
+                pressure_admission(required)
+
         if req.sampling_params.ignore_eos and getattr(self.tree_cache, "disable", True):
             return self.add_one_req_ignore_eos(req)
 

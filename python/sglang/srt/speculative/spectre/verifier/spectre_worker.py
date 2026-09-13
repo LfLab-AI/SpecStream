@@ -151,6 +151,10 @@ class SpectreWorker:
                 can_run_cuda_graph=False,
             )
         else:
+            if self.specstream_runtime is not None:
+                # Include ordinary-mode Draft wait and tree preparation in the
+                # same round wall clock used for measured q selection.
+                self.specstream_runtime.profiler.start_round_clock()
             draft_num_tokens = getattr(batch, "draft_num_tokens", None)
             if draft_num_tokens is None:
                 # ScheduleBatch declares this field with a None default.  A
@@ -424,12 +428,37 @@ class SpectreWorker:
         forward_done = self._target_forward_done_event
         current_stream = torch.cuda.current_stream()
         forward_start.record(current_stream)
-        host_forward_started = time.perf_counter()
-        batch_result = self.target_worker.forward_batch_generation(
-            model_worker_batch, is_verify=True
-        )
-        host_forward_ms = (time.perf_counter() - host_forward_started) * 1000
-        forward_done.record(current_stream)
+        # A streaming forward spends most of its wall time submitting layers
+        # and waiting for pinned staging buffers. Run only control/ACK polling
+        # during that interval; full receive and TP collectives remain below.
+        pump = None
+        if recv_draft_fn is not None and not batch.forward_mode.is_idle():
+            owner = getattr(recv_draft_fn, "__self__", None)
+            start_pump = getattr(owner, "start_specstream_grant_pump", None)
+            if start_pump is not None:
+                pump = start_pump(batch)
+        forward_failed = True
+        try:
+            host_forward_started = time.perf_counter()
+            batch_result = self.target_worker.forward_batch_generation(
+                model_worker_batch, is_verify=True
+            )
+            host_forward_ms = (time.perf_counter() - host_forward_started) * 1000
+            forward_done.record(current_stream)
+            forward_failed = False
+        finally:
+            if pump is not None:
+                # This is a generation boundary, including on CUDA/forward
+                # errors. No background reader survives into receive/release.
+                pump.stop(raise_errors=not forward_failed)
+                batch.spectre_grant_pump_iterations = pump.iterations
+                batch.spectre_grant_pump_ms = pump.elapsed_ms
+                if specstream_meta is not None:
+                    self.specstream_runtime.profiler.record_grant_pump(
+                        specstream_meta.round_id,
+                        iterations=pump.iterations,
+                        wall_ms=pump.elapsed_ms,
+                    )
         logits_output, can_run_cuda_graph = (
             batch_result.logits_output,
             batch_result.can_run_cuda_graph,
@@ -524,6 +553,24 @@ class SpectreWorker:
                 req.draft_tokens_and_logits = _default_draft()
                 req.spec_cnt += 1
                 req.len_output_ids = len(req.output_ids)
+            if (
+                getattr(getattr(batch, "specstream_decision", None), "reason", "")
+                == "parallel_pipeline_seed"
+                and retry_fn is not None
+            ):
+                seed_reqs = [req for req in batch.reqs if not _is_health_check(req)
+                             and not req.finished()
+                             and len(req.output_ids) < req.sampling_params.max_new_tokens]
+                if seed_reqs:
+                    # Reuse the already-verified output and normal TP retry
+                    # handshake; never verify padded fake drafts or a q=1 seed.
+                    fresh = retry_fn(seed_reqs)
+                    for req in seed_reqs:
+                        _apply_drafts_to_req(req, verified_token=-1,
+                                            drafts=fresh.get(req.rid), skip_d0=False)
+                        req.spec_cnt += 1
+                    logger.info("[SpecStream][PipelineSeed] requests=%d ready=%d",
+                                len(seed_reqs), sum(bool(req.cur_drafts) for req in seed_reqs))
             return
 
         failed_reqs: List = []
@@ -582,6 +629,11 @@ class SpectreWorker:
                 req.spec_cnt += 1
 
     def _forward_normal_decode(self, batch: ScheduleBatch) -> GenerationBatchResult:
+        native_meta = (
+            self.specstream_runtime.begin_native_decode(batch)
+            if self.specstream_runtime is not None
+            else None
+        )
         bs = batch.batch_size()
         last_token_ids_cpu = [
             req.output_ids[-1] if req.output_ids else req.origin_input_ids[-1]
@@ -619,7 +671,14 @@ class SpectreWorker:
         batch.seq_lens_sum += bs
 
         model_worker_batch = batch.get_model_worker_batch()
+        if native_meta is not None:
+            current_stream = torch.cuda.current_stream()
+            self._target_forward_start_event.record(current_stream)
+            native_enqueue_start = time.perf_counter()
         batch_result = self.target_worker.forward_batch_generation(model_worker_batch)
+        if native_meta is not None:
+            native_enqueue_ms = (time.perf_counter() - native_enqueue_start) * 1000
+            self._target_forward_done_event.record(current_stream)
 
         recv_draft_fn = getattr(batch, "recv_draft_fn", None)
         new_drafts_per_req: dict = (
@@ -627,6 +686,17 @@ class SpectreWorker:
         )
 
         next_token_ids_list = batch_result.next_token_ids.tolist()
+        if native_meta is not None:
+            # tolist already consumes the sampled GPU result. The event-only
+            # boundary also covers backends returning CPU token buffers without
+            # introducing a device-wide wait for unrelated H2D/Draft streams.
+            self._target_forward_done_event.synchronize()
+            native_gpu_ms = self._target_forward_start_event.elapsed_time(
+                self._target_forward_done_event
+            )
+            self.specstream_runtime.record_target_forward(
+                native_meta, native_gpu_ms, enqueue_ms=native_enqueue_ms
+            )
         for i, req in enumerate(batch.reqs):
             is_health_check = _is_health_check(req)
             token = next_token_ids_list[i] if i < len(next_token_ids_list) else None

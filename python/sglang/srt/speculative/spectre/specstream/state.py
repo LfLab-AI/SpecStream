@@ -22,11 +22,18 @@ class TargetTieredKVState:
     stream_enabled: bool = False
     seal_inflight: bool = False
     round_id: int = 0
+    gpu_history_len: int = 0
 
     def check(self, seal_granularity: int = 1) -> None:
         if seal_granularity < 1:
             raise ValueError("seal_granularity must be positive")
-        assert 0 <= self.history_len <= self.committed_len <= self.logical_len
+        assert (
+            0
+            <= self.gpu_history_len
+            <= self.history_len
+            <= self.committed_len
+            <= self.logical_len
+        )
         assert self.tail_start == self.history_len
         assert self.history_len % seal_granularity == 0
         if self.stream_enabled:

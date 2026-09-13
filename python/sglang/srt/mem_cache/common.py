@@ -231,10 +231,16 @@ def evict_from_tree_cache(tree_cache: BasePrefixCache | None, num_tokens: int):
     if tree_cache is None:
         return
 
+    allocator = tree_cache.token_to_kv_pool_allocator
+    # Optional CPU-backed caches share the native KV allocator with live
+    # requests. Give them the exact upcoming allocation requirement so they
+    # can release only the shortage, just like the radix cache below.
+    external_evictor = getattr(allocator, "_external_kv_cache_evictor", None)
+    if callable(external_evictor):
+        external_evictor(int(num_tokens))
+
     if tree_cache.is_chunk_cache():
         return
-
-    allocator = tree_cache.token_to_kv_pool_allocator
 
     if isinstance(allocator, SWATokenToKVPoolAllocator):
         # Hybrid allocator

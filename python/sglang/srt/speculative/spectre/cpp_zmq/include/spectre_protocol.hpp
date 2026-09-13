@@ -29,7 +29,8 @@ enum class SpectreAction {
   REJECT = 3,
   GRANT = 4,
   PAUSE = 5,
-  GRANT_ACK = 6
+  GRANT_ACK = 6,
+  NEED_CONTEXT = 7
 };
 
 enum class SpecType { NORMAL = 0, DRAFT_REQUEST = 1, DRAFT_RESPONSE = 2 };
@@ -56,7 +57,8 @@ inline std::string to_string(SpectreAction t) {
       {SpectreAction::REJECT, "reject"},
       {SpectreAction::GRANT, "grant"},
       {SpectreAction::PAUSE, "pause"},
-      {SpectreAction::GRANT_ACK, "grant_ack"}};
+      {SpectreAction::GRANT_ACK, "grant_ack"},
+      {SpectreAction::NEED_CONTEXT, "need_context"}};
   return m.at(t);
 }
 
@@ -85,6 +87,8 @@ inline SpectreAction str_to_remote_action(const std::string &s) {
     return SpectreAction::PAUSE;
   if (s == "grant_ack")
     return SpectreAction::GRANT_ACK;
+  if (s == "need_context")
+    return SpectreAction::NEED_CONTEXT;
   throw std::invalid_argument("Invalid SpectreAction: " + s);
 }
 

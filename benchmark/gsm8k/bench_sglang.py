@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 
 import numpy as np
 from datasets import load_dataset
@@ -11,7 +12,6 @@ from datasets import load_dataset
 from sglang.lang.api import set_default_backend
 from sglang.test.test_utils import (
     add_common_sglang_args_and_parse,
-    dump_bench_raw_result,
     select_sglang_backend,
 )
 from sglang.utils import download_and_cache_file, dump_state_text, read_jsonl
@@ -35,7 +35,7 @@ def get_few_shot_examples(lines, k):
 
 def get_answer_value(answer_str):
     answer_str = answer_str.replace(",", "")
-    numbers = re.findall(r"\d+", answer_str)
+    numbers = re.findall(r"-?\d+(?:\.\d+)?", answer_str)
     if len(numbers) < 1:
         return INVALID
     try:
@@ -48,9 +48,13 @@ def main(args):
     # Select backend
     set_default_backend(select_sglang_backend(args))
 
-    # Load tokenizer if enable_thinking is set
+    # Qwen3 correctness runs must explicitly apply the model chat template in
+    # either thinking or non-thinking mode.  Other models retain the legacy raw
+    # completion behavior when neither flag is set.
+    if args.enable_thinking and args.disable_thinking:
+        raise ValueError("--enable-thinking and --disable-thinking are mutually exclusive")
     tokenizer = None
-    if args.enable_thinking:
+    if args.enable_thinking or args.disable_thinking:
         from transformers import AutoTokenizer
 
         assert (
@@ -77,7 +81,16 @@ def main(args):
     # Construct prompts
     num_questions = args.num_questions
     num_shots = args.num_shots
-    few_shot_examples = get_few_shot_examples(lines, num_shots)
+    few_shot_lines = lines
+    if args.few_shot_data_path:
+        if not os.path.isfile(args.few_shot_data_path):
+            raise FileNotFoundError(args.few_shot_data_path)
+        few_shot_lines = list(read_jsonl(args.few_shot_data_path))
+    if len(few_shot_lines) < num_shots:
+        raise ValueError(
+            f"few-shot source has {len(few_shot_lines)} rows; need {num_shots}"
+        )
+    few_shot_examples = get_few_shot_examples(few_shot_lines, num_shots)
 
     questions = []
     labels = []
@@ -89,7 +102,7 @@ def main(args):
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=True,
+                enable_thinking=args.enable_thinking,
             )
         questions.append(raw_question)
         labels.append(get_answer_value(lines[i]["answer"]))
@@ -148,33 +161,72 @@ def main(args):
 
     # Dump results
     dump_state_text(f"tmp_output_{args.backend}.txt", states)
-    dump_bench_raw_result(
-        path=args.raw_result_file,
-        states=states,
-        preds=preds,
-        labels=labels,
-    )
+    if args.raw_result_file:
+        raw_path = Path(args.raw_result_file)
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_rows = []
+        for i, state in enumerate(states):
+            output = state["answer"]
+            meta = state.get_meta_info("answer")
+            raw_rows.append(
+                {
+                    "dataset": "gsm8k",
+                    "ordinal": i,
+                    "sample_id": f"gsm8k-{i:05d}",
+                    "reference_answer": lines[i]["answer"],
+                    "metric": "gsm8k_numeric_exact_match",
+                    "generated_text": output,
+                    "predicted_value": preds[i],
+                    "reference_value": labels[i],
+                    "correct": bool(preds[i] == labels[i]),
+                    "error": None,
+                    "meta_info": meta,
+                }
+            )
+        raw_path.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in raw_rows) + "\n",
+            encoding="utf-8",
+        )
+        print(f"GSM8K detailed results saved to {raw_path}")
 
-    with open(args.result_file, "a") as fout:
-        value = {
-            "task": "gsm8k-platinum" if args.platinum else "gsm8k",
-            "backend": args.backend,
-            "num_gpus": 1,
-            "latency": round(latency, 3),
-            "accuracy": round(acc, 3),
-            "num_requests": args.num_questions,
-            "other": {
-                "num_questions": args.num_questions,
-                "parallel": args.parallel,
-            },
-        }
-        fout.write(json.dumps(value) + "\n")
+    if args.result_file:
+        result_path = Path(args.result_file)
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        with result_path.open("w", encoding="utf-8") as fout:
+            value = {
+                "task": "gsm8k-platinum" if args.platinum else "gsm8k",
+                "method": args.method,
+                "model": args.tokenizer_path or "raw-completion",
+                "backend": args.backend,
+                "num_gpus": 1,
+                "latency": round(latency, 3),
+                "accuracy": round(acc, 3),
+                "invalid_fraction": round(float(invalid), 6),
+                "request_errors": 0,
+                "num_requests": len(questions),
+                "correct": int(np.sum(np.array(preds) == np.array(labels))),
+                "other": {
+                    "num_questions": len(questions),
+                    "parallel": args.parallel,
+                    "num_shots": num_shots,
+                    "few_shot_data_path": args.few_shot_data_path,
+                    "enable_thinking": args.enable_thinking,
+                },
+            }
+            fout.write(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+        print(f"GSM8K summary saved to {result_path}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-shots", type=int, default=5)
     parser.add_argument("--data-path", type=str, default="test.jsonl")
+    parser.add_argument(
+        "--few-shot-data-path",
+        type=str,
+        default=None,
+        help="Optional train-split JSONL used only for few-shot demonstrations.",
+    )
     parser.add_argument("--num-questions", type=int, default=200)
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -184,6 +236,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable thinking mode by wrapping prompts with chat template",
     )
+    parser.add_argument(
+        "--disable-thinking",
+        action="store_true",
+        help="Apply the tokenizer chat template with enable_thinking=False (Qwen3).",
+    )
+    parser.add_argument("--method", type=str, default="")
     parser.add_argument(
         "--tokenizer-path",
         type=str,

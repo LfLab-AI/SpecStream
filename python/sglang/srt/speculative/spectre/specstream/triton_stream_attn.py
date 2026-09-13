@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 
@@ -20,6 +21,245 @@ except (ImportError, ModuleNotFoundError):
 
 
 if triton is not None:
+
+    @triton.jit
+    def _initialize_batched_state_kernel(
+        m, z, a, ROWS: tl.constexpr, D: tl.constexpr, BLOCK: tl.constexpr
+    ):
+        i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        tl.store(m + i, -float("inf"), i < ROWS)
+        tl.store(z + i, 0.0, i < ROWS)
+        tl.store(a + i, 0.0, i < ROWS * D)
+
+    @triton.jit
+    def _finalize_batched_state_kernel(
+        m, z, a, output, lse, ROWS: tl.constexpr, D: tl.constexpr, BLOCK_D: tl.constexpr
+    ):
+        row = tl.program_id(0)
+        d = tl.arange(0, BLOCK_D)
+        normalizer = tl.load(z + row)
+        maximum = tl.load(m + row)
+        acc = tl.load(a + row * D + d, d < D, other=0.0)
+        # Avoid evaluating 0/0 for empty rows, including all-invalid KV splits.
+        safe_norm = tl.where(normalizer > 0.0, normalizer, 1.0)
+        tl.store(
+            output + row * D + d,
+            tl.where(normalizer > 0.0, acc / safe_norm, 0.0),
+            d < D,
+        )
+        tl.store(
+            lse + row,
+            tl.where(normalizer > 0.0, maximum + tl.log(safe_norm), -float("inf")),
+        )
+
+    @triton.jit
+    def _batched_split_attention_kernel(
+        query,
+        key,
+        value,
+        valid_tokens,
+        req_to_token,
+        metadata,
+        state_max,
+        state_norm,
+        state_acc,
+        part_max,
+        part_norm,
+        part_acc,
+        stride_qb,
+        stride_qq,
+        stride_qh,
+        stride_qd,
+        stride_kb,
+        stride_kn,
+        stride_kh,
+        stride_kd,
+        stride_vb,
+        stride_vn,
+        stride_vh,
+        stride_vd,
+        stride_table_r,
+        stride_table_n,
+        query_count: tl.constexpr,
+        num_query_heads: tl.constexpr,
+        num_kv_heads: tl.constexpr,
+        groups: tl.constexpr,
+        batch_size: tl.constexpr,
+        key_capacity: tl.constexpr,
+        head_dim: tl.constexpr,
+        scale: tl.constexpr,
+        PACKED_KV: tl.constexpr,
+        UNIFORM_KV_LENGTH: tl.constexpr,
+        CAUSAL: tl.constexpr,
+        NUM_SPLITS: tl.constexpr,
+        SPLIT_TOKENS: tl.constexpr,
+        USE_BF16: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        """Compute disjoint KV intervals without copying their shared Q/K/V.
+
+        Partial states use natural-log maxima and FP32 sums. Splits never
+        include the incoming state: the merge adds it exactly once. With one
+        split, update in place and skip both scratch and the reduction launch.
+        """
+        qr = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+        kvh = tl.program_id(1)
+        item_split = tl.program_id(2)
+        item = item_split // NUM_SPLITS
+        split = item_split % NUM_SPLITS
+        qi = qr // groups
+        qg = qr % groups
+        qh = kvh * groups + qg
+        row_ok = qr < query_count * groups
+        d = tl.arange(0, BLOCK_D)
+        q = tl.load(
+            query
+            + item * stride_qb
+            + qi[:, None] * stride_qq
+            + qh[:, None] * stride_qh
+            + d[None, :] * stride_qd,
+            row_ok[:, None] & (d[None, :] < head_dim),
+            other=0.0,
+        )
+        row = item * query_count * num_query_heads + qi * num_query_heads + qh
+        if NUM_SPLITS == 1:
+            m = tl.load(state_max + row, row_ok, other=-float("inf"))
+            z = tl.load(state_norm + row, row_ok, other=0.0)
+            acc = tl.load(
+                state_acc + row[:, None] * head_dim + d[None, :],
+                row_ok[:, None] & (d[None, :] < head_dim),
+                other=0.0,
+            )
+        else:
+            m = tl.full((BLOCK_M,), -float("inf"), tl.float32)
+            z = tl.full((BLOCK_M,), 0.0, tl.float32)
+            acc = tl.full((BLOCK_M, BLOCK_D), 0.0, tl.float32)
+        if PACKED_KV:
+            if UNIFORM_KV_LENGTH:
+                valid = key_capacity
+            else:
+                valid = tl.minimum(
+                    tl.maximum(tl.load(valid_tokens + item), 0), key_capacity
+                )
+            key_start = 0
+            query_start = 0
+            req_row = 0
+        else:
+            req_row = tl.load(metadata + item * 4)
+            key_start = tl.load(metadata + item * 4 + 1)
+            valid = tl.minimum(
+                tl.maximum(tl.load(metadata + item * 4 + 2), 0), key_capacity
+            )
+            query_start = tl.load(metadata + item * 4 + 3)
+        split_start = split * SPLIT_TOKENS
+        split_end = tl.minimum(split_start + SPLIT_TOKENS, valid)
+        log2e = 1.4426950408889634
+        for start in tl.range(split_start, split_end, BLOCK_N):
+            n = start + tl.arange(0, BLOCK_N)
+            n_ok = n < split_end
+            if PACKED_KV:
+                slot = n
+            else:
+                slot = tl.load(
+                    req_to_token
+                    + req_row * stride_table_r
+                    + (key_start + n) * stride_table_n,
+                    n_ok,
+                    other=0,
+                )
+            k = tl.load(
+                key
+                + item * stride_kb
+                + slot[None, :] * stride_kn
+                + kvh * stride_kh
+                + d[:, None] * stride_kd,
+                (d[:, None] < head_dim) & n_ok[None, :],
+                other=0.0,
+            )
+            v = tl.load(
+                value
+                + item * stride_vb
+                + slot[:, None] * stride_vn
+                + kvh * stride_vh
+                + d[None, :] * stride_vd,
+                n_ok[:, None] & (d[None, :] < head_dim),
+                other=0.0,
+            )
+            allowed = row_ok[:, None] & n_ok[None, :]
+            if CAUSAL:
+                allowed = allowed & (
+                    key_start + n[None, :] <= query_start + qi[:, None]
+                )
+            scores = tl.dot(q, k) * scale
+            scores = tl.where(allowed, scores, -float("inf"))
+            merged_max = tl.maximum(m, tl.max(scores, axis=1))
+            safe_max = tl.where(merged_max == -float("inf"), 0.0, merged_max)
+            alpha = tl.where(m == -float("inf"), 0.0, tl.exp2((m - safe_max) * log2e))
+            weights = tl.where(
+                allowed, tl.exp2((scores - safe_max[:, None]) * log2e), 0.0
+            )
+            z = z * alpha + tl.sum(weights, axis=1)
+            acc = acc * alpha[:, None]
+            if USE_BF16:
+                acc = tl.dot(weights.to(tl.bfloat16), v, acc)
+            else:
+                acc = tl.dot(weights.to(tl.float16), v, acc)
+            m = merged_max
+        if NUM_SPLITS == 1:
+            tl.store(state_max + row, m, row_ok)
+            tl.store(state_norm + row, z, row_ok)
+            tl.store(
+                state_acc + row[:, None] * head_dim + d[None, :],
+                acc,
+                row_ok[:, None] & (d[None, :] < head_dim),
+            )
+        else:
+            prow = split * batch_size * query_count * num_query_heads + row
+            tl.store(part_max + prow, m, row_ok)
+            tl.store(part_norm + prow, z, row_ok)
+            tl.store(
+                part_acc + prow[:, None] * head_dim + d[None, :],
+                acc,
+                row_ok[:, None] & (d[None, :] < head_dim),
+            )
+
+    @triton.jit
+    def _merge_split_states_kernel(
+        state_max,
+        state_norm,
+        state_acc,
+        part_max,
+        part_norm,
+        part_acc,
+        ROWS: tl.constexpr,
+        D: tl.constexpr,
+        NUM_SPLITS: tl.constexpr,
+        BLOCK_S: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        s = tl.arange(0, BLOCK_S)
+        d = tl.arange(0, BLOCK_D)
+        pm = tl.load(part_max + s * ROWS + row, s < NUM_SPLITS, other=-float("inf"))
+        pz = tl.load(part_norm + s * ROWS + row, s < NUM_SPLITS, other=0.0)
+        old_m = tl.load(state_max + row)
+        old_z = tl.load(state_norm + row)
+        merged_max = tl.maximum(old_m, tl.max(pm, axis=0))
+        safe_max = tl.where(merged_max == -float("inf"), 0.0, merged_max)
+        factor = tl.where(pm == -float("inf"), 0.0, tl.exp(pm - safe_max))
+        old_factor = tl.where(old_m == -float("inf"), 0.0, tl.exp(old_m - safe_max))
+        pa = tl.load(
+            part_acc + (s[:, None] * ROWS + row) * D + d[None, :],
+            (s[:, None] < NUM_SPLITS) & (d[None, :] < D),
+            other=0.0,
+        )
+        old_a = tl.load(state_acc + row * D + d, d < D, other=0.0)
+        result = old_a * old_factor + tl.sum(pa * factor[:, None], axis=0)
+        tl.store(state_max + row, merged_max)
+        tl.store(state_norm + row, old_z * old_factor + tl.sum(pz * factor, axis=0))
+        tl.store(state_acc + row * D + d, result, d < D)
 
     @triton.jit
     def _multi_query_tiled_online_attention_kernel(
@@ -147,7 +387,9 @@ if triton is not None:
             )
             block_max = tl.max(scores, axis=1)
             merged_max = tl.maximum(m, block_max)
-            safe_max = tl.where(row_mask, merged_max, 0.0)
+            safe_max = tl.where(
+                row_mask & (merged_max != -float("inf")), merged_max, 0.0
+            )
             alpha = tl.where(
                 m == -float("inf"),
                 0.0,
@@ -354,7 +596,9 @@ if triton is not None:
             )
             block_max = tl.max(scores, axis=1)
             merged_max = tl.maximum(m, block_max)
-            safe_max = tl.where(row_mask, merged_max, 0.0)
+            safe_max = tl.where(
+                row_mask & (merged_max != -float("inf")), merged_max, 0.0
+            )
             alpha = tl.where(
                 m == -float("inf"),
                 0.0,
@@ -381,6 +625,315 @@ if triton is not None:
 
 def triton_fused_available() -> bool:
     return triton is not None and torch.cuda.is_available()
+
+
+def init_batched_online_softmax_state(
+    queries: torch.Tensor,
+    num_kv_heads: int,
+    value_head_dim: int | None = None,
+) -> OnlineSoftmaxState:
+    """Initialize the complete request batch with one GPU launch."""
+    if queries.ndim != 4:
+        raise ValueError("batched queries must be [B,Q,Hq,D]")
+    batch, count, heads, dim = queries.shape
+    if num_kv_heads < 1 or heads % num_kv_heads:
+        raise ValueError("query heads must be divisible by KV heads")
+    value_dim = int(dim if value_head_dim is None else value_head_dim)
+    shape = (batch, count, num_kv_heads, heads // num_kv_heads)
+    m = torch.empty(shape, device=queries.device, dtype=torch.float32)
+    z = torch.empty_like(m)
+    a = torch.empty((*shape, value_dim), device=queries.device, dtype=torch.float32)
+    if queries.is_cuda and triton is not None and m.numel():
+        _initialize_batched_state_kernel[(triton.cdiv(a.numel(), 256),)](
+            m, z, a, ROWS=m.numel(), D=value_dim, BLOCK=256
+        )
+    else:
+        m.fill_(-torch.inf)
+        z.zero_()
+        a.zero_()
+    return OnlineSoftmaxState(m, z, a)
+
+
+def finalize_batched_online_softmax_state(
+    state: OnlineSoftmaxState,
+    *,
+    output_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Normalize and cast all request outputs in a single GPU kernel."""
+    if state.max_score.ndim != 4:
+        raise ValueError("batched online state must be [B,Q,Hkv,G]")
+    batch, count, kvheads, groups = state.max_score.shape
+    dim = state.weighted_value.shape[-1]
+    shape = (batch, count, kvheads * groups)
+    dtype = torch.float32 if output_dtype is None else output_dtype
+    output = torch.empty((*shape, dim), device=state.max_score.device, dtype=dtype)
+    lse = torch.empty(shape, device=state.max_score.device, dtype=torch.float32)
+    if state.max_score.is_cuda and triton is not None and state.max_score.numel():
+        _finalize_batched_state_kernel[(state.max_score.numel(),)](
+            state.max_score,
+            state.normalizer,
+            state.weighted_value,
+            output,
+            lse,
+            ROWS=state.max_score.numel(),
+            D=int(dim),
+            BLOCK_D=triton.next_power_of_2(int(dim)),
+            num_warps=4,
+        )
+    else:
+        z = state.normalizer
+        safe_z = z.clamp_min(torch.finfo(torch.float32).tiny)
+        output.copy_(
+            torch.where(
+                (z > 0).unsqueeze(-1), state.weighted_value / safe_z.unsqueeze(-1), 0.0
+            ).reshape(*shape, dim)
+        )
+        lse.copy_(
+            torch.where(z > 0, state.max_score + safe_z.log(), -torch.inf).reshape(
+                shape
+            )
+        )
+    return output, lse
+
+
+def choose_split_kv_count(
+    *,
+    batch_size: int,
+    query_count: int,
+    num_query_heads: int,
+    num_kv_heads: int,
+    key_count: int,
+    sm_count: int,
+) -> int:
+    """Bound split scratch/merge cost while filling low-grid long-KV launches."""
+    if key_count < 1024 or not batch_size:
+        return 1
+    groups = num_query_heads // num_kv_heads
+    block_m = 16 if query_count * groups <= 16 else 32
+    programs = batch_size * num_kv_heads * math.ceil(query_count * groups / block_m)
+    desired = max(1, math.ceil(sm_count / max(programs, 1)))
+    # At least 512 KV tokens amortize each program's Q load and partial write.
+    limit = min(16, max(1, key_count // 512))
+    result = 1
+    while result < desired and result * 2 <= limit:
+        result *= 2
+    return result
+
+
+def _resolve_split_count(queries, num_kv_heads, key_count, num_splits):
+    configured = os.environ.get("SPECSTREAM_SPLIT_KV", "auto").strip().lower()
+    if num_splits is None and configured != "auto":
+        num_splits = 1 if configured in ("off", "false", "0") else int(configured)
+    if num_splits is not None:
+        if not 1 <= int(num_splits) <= 32:
+            raise ValueError("split-KV count must be between 1 and 32")
+        return int(num_splits)
+    return choose_split_kv_count(
+        batch_size=int(queries.shape[0]),
+        query_count=int(queries.shape[1]),
+        num_query_heads=int(queries.shape[2]),
+        num_kv_heads=num_kv_heads,
+        key_count=key_count,
+        sm_count=torch.cuda.get_device_properties(queries.device).multi_processor_count,
+    )
+
+
+def _launch_batched_split_update(
+    state,
+    queries,
+    key,
+    value,
+    *,
+    valid_tokens,
+    req_to_token,
+    metadata,
+    key_count,
+    scale,
+    causal,
+    num_splits,
+):
+    batch, count, heads, dim = map(int, queries.shape)
+    packed = metadata is None
+    kvheads = int(key.shape[-2])
+    groups = heads // kvheads
+    splits = _resolve_split_count(queries, kvheads, key_count, num_splits)
+    block_m = 16 if count * groups <= 16 else 32
+    block_n = 64
+    rows = state.max_score.numel()
+    if splits > 1:
+        cache_key = ("split_kv", splits, rows, dim)
+        partials = state.workspace.get(cache_key)
+        if partials is None:
+            partials = (
+                torch.empty((splits, rows), device=queries.device, dtype=torch.float32),
+                torch.empty((splits, rows), device=queries.device, dtype=torch.float32),
+                torch.empty(
+                    (splits, rows, dim), device=queries.device, dtype=torch.float32
+                ),
+            )
+            state.workspace[cache_key] = partials
+    else:
+        partials = (state.max_score, state.normalizer, state.weighted_value)
+    kstrides = key.stride() if packed else (0, *key.stride())
+    vstrides = value.stride() if packed else (0, *value.stride())
+    _batched_split_attention_kernel[
+        (triton.cdiv(count * groups, block_m), kvheads, batch * splits)
+    ](
+        queries,
+        key,
+        value,
+        key if valid_tokens is None else valid_tokens,
+        key if req_to_token is None else req_to_token,
+        key if metadata is None else metadata,
+        state.max_score,
+        state.normalizer,
+        state.weighted_value,
+        *partials,
+        *queries.stride(),
+        *kstrides,
+        *vstrides,
+        0 if req_to_token is None else req_to_token.stride(0),
+        0 if req_to_token is None else req_to_token.stride(1),
+        query_count=count,
+        num_query_heads=heads,
+        num_kv_heads=kvheads,
+        groups=groups,
+        batch_size=batch,
+        key_capacity=int(key_count),
+        head_dim=dim,
+        scale=float(scale) if scale is not None else 1.0 / math.sqrt(dim),
+        PACKED_KV=packed,
+        UNIFORM_KV_LENGTH=valid_tokens is None,
+        CAUSAL=bool(causal),
+        NUM_SPLITS=splits,
+        SPLIT_TOKENS=triton.cdiv(triton.cdiv(key_count, splits), block_n) * block_n,
+        USE_BF16=queries.dtype == torch.bfloat16,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_D=triton.next_power_of_2(dim),
+        num_warps=4,
+        num_stages=2,
+    )
+    if splits > 1:
+        _merge_split_states_kernel[(rows,)](
+            state.max_score,
+            state.normalizer,
+            state.weighted_value,
+            *partials,
+            ROWS=rows,
+            D=dim,
+            NUM_SPLITS=splits,
+            BLOCK_S=triton.next_power_of_2(splits),
+            BLOCK_D=triton.next_power_of_2(dim),
+            num_warps=4,
+        )
+
+
+def update_gpu_paged_state_batched(
+    state: OnlineSoftmaxState,
+    queries: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    req_to_token: torch.Tensor,
+    metadata: torch.Tensor,
+    *,
+    max_key_count: int,
+    scale: float | None = None,
+    causal: bool = True,
+    require_fused_cuda: bool = True,
+    num_splits: int | None = None,
+) -> tuple[OnlineSoftmaxState, bool]:
+    """Merge GPU History or Tail directly through the shared page table.
+
+    Metadata [B,4] contains (request table row, absolute key start, key count,
+    absolute query start). Build it once per round and reuse across all layers.
+    max_key_count is its CPU-known upper bound; no device metadata is read back.
+    The caller must supply valid page-table rows, intervals and cache slots.
+    Logit-capped/reference attention must retain the existing reference path.
+    """
+    if queries.ndim != 4 or key_cache.ndim != 3 or value_cache.shape != key_cache.shape:
+        raise ValueError("paged batch expects [B,Q,H,D] and matching [N,Hkv,D] K/V")
+    batch, count, heads, dim = map(int, queries.shape)
+    kvheads = int(key_cache.shape[1])
+    if key_cache.shape[-1] != dim or kvheads < 1 or heads % kvheads:
+        raise ValueError("paged batch GQA geometry mismatch")
+    expected = (batch, count, kvheads, heads // kvheads)
+    if state.max_score.shape != expected or state.normalizer.shape != expected:
+        raise ValueError("paged batch state geometry mismatch")
+    if state.weighted_value.shape != (*expected, dim):
+        raise ValueError("paged batch accumulator geometry mismatch")
+    if metadata.shape != (batch, 4) or req_to_token.ndim != 2:
+        raise ValueError("paged batch metadata must be [B,4], page table rank 2")
+    if metadata.dtype not in (torch.int32, torch.int64) or req_to_token.dtype not in (
+        torch.int32,
+        torch.int64,
+    ):
+        raise ValueError("paged batch descriptors must have integer dtype")
+    tensors = (
+        key_cache,
+        value_cache,
+        req_to_token,
+        metadata,
+        state.max_score,
+        state.normalizer,
+        state.weighted_value,
+    )
+    if any(t.device != queries.device for t in tensors):
+        raise ValueError("paged batch tensors must share the query device")
+    if max_key_count < 0:
+        raise ValueError("max_key_count cannot be negative")
+    if max_key_count == 0 or batch == 0:
+        return state, False
+    can_fuse = (
+        queries.is_cuda
+        and triton is not None
+        and queries.dtype in (torch.float16, torch.bfloat16)
+        and key_cache.dtype == queries.dtype
+        and value_cache.dtype == queries.dtype
+        and dim in (64, 128)
+        and queries.stride(-1) == 1
+        and key_cache.stride(-1) == 1
+        and value_cache.stride(-1) == 1
+    )
+    if can_fuse:
+        if not metadata.is_contiguous():
+            metadata = metadata.contiguous()
+        _launch_batched_split_update(
+            state,
+            queries,
+            key_cache,
+            value_cache,
+            valid_tokens=None,
+            req_to_token=req_to_token,
+            metadata=metadata,
+            key_count=int(max_key_count),
+            scale=scale,
+            causal=causal,
+            num_splits=num_splits,
+        )
+        return state, True
+    if queries.is_cuda and require_fused_cuda:
+        raise RuntimeError(
+            "optimized paged batch requires Triton and FP16/BF16 D=64/128"
+        )
+    updated = []
+    for index, item in enumerate(split_packed_history_cohort_state(state)):
+        row, start, length, qstart = map(int, metadata[index].tolist())
+        if not 0 <= length <= max_key_count:
+            raise ValueError("paged key length exceeds max_key_count")
+        slots = req_to_token[row, start : start + length].long()
+        item = update_online_softmax_state(
+            item,
+            queries[index],
+            key_cache.index_select(0, slots),
+            value_cache.index_select(0, slots),
+            range(qstart, qstart + count),
+            range(start, start + length),
+            scale=scale,
+            causal=causal,
+        )
+        updated.append(item)
+    return stack_packed_history_cohort_states(updated), False
 
 
 def _launch_multi_query_tiled_update(
@@ -483,6 +1036,7 @@ def update_packed_history_state(
     *,
     scale: float | None = None,
     require_fused_cuda: bool = True,
+    num_splits: int | None = None,
 ) -> tuple[OnlineSoftmaxState, bool]:
     if packed_kv.ndim != 4 or packed_kv.shape[1] != 2:
         raise ValueError("packed KV must have shape [tokens,2,Hkv,head_dim]")
@@ -521,6 +1075,36 @@ def update_packed_history_state(
         raise ValueError("online-softmax state geometry mismatch")
     if state.weighted_value.shape != (*expected, int(head_dim)):
         raise ValueError("fused kernel requires value_head_dim == head_dim")
+
+    if (
+        query.dtype in (torch.float16, torch.bfloat16)
+        and packed_kv.dtype == query.dtype
+        and int(head_dim) in (64, 128)
+    ):
+        splits = _resolve_split_count(
+            query.unsqueeze(0), int(num_kv_heads), int(key_count), num_splits
+        )
+        if splits > 1:
+            batched_state = OnlineSoftmaxState(
+                state.max_score.unsqueeze(0),
+                state.normalizer.unsqueeze(0),
+                state.weighted_value.unsqueeze(0),
+                workspace=state.workspace,
+            )
+            _launch_batched_split_update(
+                batched_state,
+                query.unsqueeze(0),
+                packed_kv[:, 0].unsqueeze(0),
+                packed_kv[:, 1].unsqueeze(0),
+                valid_tokens=None,
+                req_to_token=None,
+                metadata=None,
+                key_count=int(key_count),
+                scale=scale,
+                causal=False,
+                num_splits=splits,
+            )
+            return state, True
 
     if _launch_multi_query_tiled_update(
         state,
@@ -651,12 +1235,15 @@ def update_packed_history_cohort_batched(
     *,
     scale: float | None = None,
     require_fused_cuda: bool = True,
+    num_splits: int | None = None,
 ) -> tuple[OnlineSoftmaxState, bool]:
     """Update an already-stacked cohort without per-chunk state repacking."""
 
     if queries.ndim != 4 or packed_kv.ndim != 5 or packed_kv.shape[2] != 2:
         raise ValueError("cohort Q/KV geometry must be [B,Q,H,D]/[B,N,2,H,D]")
     cohort_size, query_count, num_query_heads, head_dim = queries.shape
+    if packed_kv.shape[0] != cohort_size or packed_kv.device != queries.device:
+        raise ValueError("cohort KV batch/device does not match query")
     if valid_tokens.numel() != cohort_size:
         raise ValueError("cohort valid-token count does not match")
     num_kv_heads = int(packed_kv.shape[3])
@@ -703,6 +1290,25 @@ def update_packed_history_cohort_batched(
         valid_tokens = valid_tokens.contiguous()
     if not queries.is_contiguous():
         queries = queries.contiguous()
+
+    splits = _resolve_split_count(
+        queries, num_kv_heads, int(packed_kv.shape[1]), num_splits
+    )
+    if splits > 1:
+        _launch_batched_split_update(
+            state,
+            queries,
+            packed_kv[:, :, 0],
+            packed_kv[:, :, 1],
+            valid_tokens=valid_tokens,
+            req_to_token=None,
+            metadata=None,
+            key_count=int(packed_kv.shape[1]),
+            scale=scale,
+            causal=False,
+            num_splits=splits,
+        )
+        return state, True
 
     block_d = triton.next_power_of_2(int(head_dim))
     block_n = 32 if int(head_dim) >= 128 else 64

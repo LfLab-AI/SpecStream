@@ -16,7 +16,8 @@ class _HistoryStore:
     def __init__(self, chunks):
         self.chunks = chunks
 
-    def iter_layer_chunks(self, rid, layer_id, *, history_end):
+    def iter_layer_chunks(self, rid, layer_id, *, history_start=0, history_end):
+        assert history_start == 0
         assert history_end == 4
         return iter(self.chunks[(rid, layer_id)])
 
@@ -30,7 +31,7 @@ class _Staging:
         self.cohort_direct_submits = []
         self.waited = []
 
-    def submit_many(self, sources, slot):
+    def submit_many(self, sources, slot, *, round_id=None):
         transfer = SimpleNamespace(
             kind="independent",
             index=len(self.independent_submits),
@@ -39,25 +40,27 @@ class _Staging:
             nbytes=sum(source.nbytes for source in sources),
             submitted_ns=time.perf_counter_ns(),
         )
-        self.independent_submits.append((tuple(sources), slot))
+        self.independent_submits.append((tuple(sources), slot, round_id))
         return transfer
 
-    def submit_cohort_groups(self, source_groups, slot):
+    def submit_cohort_groups(self, source_groups, slot, *, round_id=None):
         transfer = SimpleNamespace(
             kind="cohort",
             index=len(self.cohort_submits),
             slot=slot,
         )
-        self.cohort_submits.append((tuple(map(tuple, source_groups)), slot))
+        self.cohort_submits.append((tuple(map(tuple, source_groups)), slot, round_id))
         return transfer
 
-    def submit_cohort_groups_direct_async(self, source_groups, slot):
+    def submit_cohort_groups_direct_async(self, source_groups, slot, *, round_id=None):
         transfer = SimpleNamespace(
             kind="cohort_direct",
             index=len(self.cohort_direct_submits),
             slot=slot,
         )
-        self.cohort_direct_submits.append((tuple(map(tuple, source_groups)), slot))
+        self.cohort_direct_submits.append(
+            (tuple(map(tuple, source_groups)), slot, round_id)
+        )
         return transfer
 
     def wait_ready(self, transfer):
@@ -171,7 +174,7 @@ def test_large_steady_state_cohort_avoids_synchronous_host_pack(monkeypatch):
     module = sys.modules[SpecStreamVerifier.__module__]
     monkeypatch.setattr(module, "_MAX_SYNCHRONOUS_COHORT_PACK_BYTES", 1)
 
-    verifier._submit_cohort_task(tasks[0], groups, 0)
+    verifier._submit_cohort_task(tasks[0], groups, 0, round_id=meta.round_id)
 
     assert verifier.staging.cohort_submits == []
     assert len(verifier.staging.cohort_direct_submits) == 1
@@ -186,6 +189,25 @@ def test_discard_request_invalidates_shared_prefetch_queue():
     verifier.discard_layer_prefetch("r1")
 
     assert verifier._batched_layer_prefetch == {}
+
+
+def test_partial_prefetch_in_nonmatching_slot_is_not_overwritten_by_queue_fill():
+    verifier = _verifier()
+    items = _items(2)
+    meta = SimpleNamespace(round_id=19)
+    layer = SimpleNamespace(layer_id=0)
+    tasks, keys = verifier._build_independent_tasks(items, 0)
+    # Task 0 was prefetched into the first slot freed by the previous layer,
+    # which need not equal task index 0. Filling task 1 must use the other slot.
+    verifier._prefetch_next_independent_layer(
+        items, meta, layer, available_slots=(1,), prepared=(0, tasks, keys))
+    verifier.profiler = SimpleNamespace(
+        record_attention=lambda *a, **k: None, record_h2d=lambda *a, **k: None)
+    verifier._update_history_state = lambda state, *a, **k: state
+    queries = {item.rid: object() for item in items}
+    states = {item.rid: object() for item in items}
+    verifier._stream_history_independent_batch(items, queries, states, meta, layer)
+    assert [entry[1] for entry in verifier.staging.independent_submits[:2]] == [1, 0]
 
 
 def test_independent_pipeline_steals_first_free_slot_before_last_group():

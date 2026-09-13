@@ -546,11 +546,15 @@ class ServerArgs:
     specstream_num_buffers: int = 2
     specstream_chunks_per_transfer: int = 4
     specstream_layer_prefetch: bool = True
+    specstream_serialize_h2d: bool = False
     specstream_active_tail_tokens: int = 512
     specstream_min_history_tokens: int = 8192
+    specstream_gpu_history_cache_tokens: int = 49152
+    specstream_gpu_history_min_free_tokens: int = 0
     specstream_cpu_memory_gb: int = 128
     specstream_gpu_reserve_mb: int = 1024
     specstream_dynamic_q: bool = False
+    specstream_force_ordinary_mode: bool = False
     specstream_q_candidates: str = "1,2,4,6,8"
     specstream_q_switch_threshold: float = 0.08
     specstream_coexec_enabled: bool = False
@@ -560,6 +564,7 @@ class ServerArgs:
     specstream_coexec_compute_ratio_threshold: float = 0.90
     specstream_coexec_require_mps: bool = False
     specstream_pcie_slack_coexec: bool = False
+    specstream_pcie_grant_poll_us: int = 200
     specstream_smctrl_enabled: bool = False
     specstream_grant_token_quantum: int = 1
     specstream_coexec_target_slowdown_budget: float = 0.05
@@ -3166,6 +3171,17 @@ class ServerArgs:
                     raise ValueError(
                         "--specstream-colocated-tp-rank must identify a Target TP rank"
                     )
+            if self.specstream_pcie_slack_coexec:
+                if not 0 <= self.specstream_colocated_tp_rank < self.tp_size:
+                    raise ValueError(
+                        "--specstream-colocated-tp-rank must identify a Target TP rank"
+                    )
+                if self.specstream_colocated_tp_rank != 0:
+                    raise ValueError(
+                        "--specstream-pcie-slack-coexec currently requires "
+                        "--specstream-colocated-tp-rank 0 because Target TP rank 0 "
+                        "owns the ZMQ grant pump and its CUDA H2D events"
+                    )
             SpecStreamConfig.from_server_args(self)
             if not self.disable_radix_cache:
                 self.disable_radix_cache = True
@@ -5361,6 +5377,16 @@ class ServerArgs:
             ),
         )
         parser.add_argument(
+            "--specstream-serialize-h2d",
+            action=argparse.BooleanOptionalAction,
+            default=ServerArgs.specstream_serialize_h2d,
+            help=(
+                "Make every History H2D copy wait for previously queued Target "
+                "compute before copying. This is the strict no-overlap control "
+                "used by the K1/K2 ablations."
+            ),
+        )
+        parser.add_argument(
             "--specstream-active-tail-tokens",
             type=int,
             default=ServerArgs.specstream_active_tail_tokens,
@@ -5371,6 +5397,28 @@ class ServerArgs:
             type=int,
             default=ServerArgs.specstream_min_history_tokens,
             help="Minimum sealed prefix required before activating sticky streaming.",
+        )
+        parser.add_argument(
+            "--specstream-gpu-history-cache-tokens",
+            type=int,
+            default=ServerArgs.specstream_gpu_history_cache_tokens,
+            help=(
+                "Global cap on committed CPU-backed History tokens retained in "
+                "the fixed Target KV pool. Zero disables the hot cache; -1 "
+                "opts into an allocator-aware automatic budget that reserves "
+                "prefill, active Tail/Frontier, and allocation headroom. "
+                "A token covers all layers of this rank (not tokens per layer)."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-gpu-history-min-free-tokens",
+            type=int,
+            default=ServerArgs.specstream_gpu_history_min_free_tokens,
+            help=(
+                "Optional allocation guard added to the exact number of Target "
+                "KV tokens requested by the next native allocation. Zero "
+                "disables a fixed free-token watermark."
+            ),
         )
         parser.add_argument(
             "--specstream-cpu-memory-gb",
@@ -5392,6 +5440,16 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.specstream_dynamic_q,
             help="Enable batch-level I/O-aware SPECTRE horizon control.",
+        )
+        parser.add_argument(
+            "--specstream-force-ordinary-mode",
+            action="store_true",
+            default=ServerArgs.specstream_force_ordinary_mode,
+            help=(
+                "Keep dynamic-q decisions in SPECTRE ordinary/serial mode. "
+                "This is an experiment-control switch for isolating KV streaming "
+                "and horizon control from Target/Draft parallelism."
+            ),
         )
         parser.add_argument(
             "--specstream-q-candidates",
@@ -5459,9 +5517,19 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.specstream_pcie_slack_coexec,
             help=(
-                "Restrict initial colocated Draft grants to measured, exposed "
-                "SpecStream History H2D windows. Requires tiered KV, SM control "
-                "and MPS, plus a history_h2d-calibrated resource profile."
+                "Restrict colocated Draft grants to current CUDA-event-confirmed "
+                "exposed SpecStream History H2D stalls. Requires tiered KV, SM "
+                "control and MPS. Fixed-TPC mode learns token timing online; "
+                "profile-selected mode requires a history_h2d resource entry."
+            ),
+        )
+        parser.add_argument(
+            "--specstream-pcie-grant-poll-us",
+            type=int,
+            default=ServerArgs.specstream_pcie_grant_poll_us,
+            help=(
+                "Target-side polling interval for current exposed-H2D CUDA "
+                "events. Smaller values catch short stalls but use more CPU."
             ),
         )
         parser.add_argument(
@@ -5470,16 +5538,19 @@ class ServerArgs:
             default=ServerArgs.specstream_smctrl_enabled,
             help=(
                 "Enable Target-priority one-token Draft grants and BulletServe-"
-                "style TPC masking. Requires an offline calibrated "
-                "resource profile and libsmctrl on the Drafter."
+                "style TPC masking. Requires libsmctrl on the Drafter; profile-"
+                "selected mode also requires an offline calibrated resource profile."
             ),
         )
         parser.add_argument(
             "--specstream-grant-token-quantum",
             type=int,
-            choices=(1,),
+            choices=tuple(range(1, 9)),
             default=ServerArgs.specstream_grant_token_quantum,
-            help="Execution-grant quantum. SpecStream v1 requires exactly one token.",
+            help=(
+                "Maximum tokens in an exclusive DRAFT_CATCHUP grant (1-8). "
+                "SLACK_FILL remains one token to protect Target deadlines."
+            ),
         )
         parser.add_argument(
             "--specstream-coexec-target-slowdown-budget",
@@ -5528,8 +5599,8 @@ class ServerArgs:
             type=int,
             default=ServerArgs.specstream_smctrl_calibration_tpcs,
             help=(
-                "Calibration only: use a fixed Draft TPC count instead of an "
-                "online resource profile. Zero disables calibration mode."
+                "Use a fixed Draft TPC count instead of selecting TPCs from an "
+                "offline resource profile. Zero disables fixed-TPC mode."
             ),
         )
         parser.add_argument(
@@ -5537,8 +5608,9 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.specstream_smctrl_calibration_allow_overlap,
             help=(
-                "Calibration only: issue fixed-TPC grants during Target forward "
-                "to measure interference. Never use for the final online run."
+                "Allow fixed-TPC Draft work during measured Target slack. This "
+                "remains fail-closed until online Draft-step and Target-only "
+                "timings exist, and every overlap grant has a safe deadline."
             ),
         )
         parser.add_argument(

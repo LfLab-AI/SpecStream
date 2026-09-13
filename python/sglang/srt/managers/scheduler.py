@@ -3158,6 +3158,12 @@ class Scheduler(
     def flush_cache(self):
         """Flush the memory pool and cache."""
         if self.is_fully_idle():
+            # SpecStream owns asynchronous D2H tickets and GPU-History
+            # residency metadata.  Drain and discard that state while the
+            # request/page tables are still valid; clearing it after the
+            # generic allocators leaves stale req_pool_idx entries behind.
+            if self.spec_algorithm.is_spectre():
+                self.reset_spectre_target_state()
             self.cur_batch = None
             self.last_batch = None
             self.tree_cache.reset()
@@ -3170,9 +3176,6 @@ class Scheduler(
                 clear_cache_pool = getattr(self.draft_worker, "clear_cache_pool", None)
                 if clear_cache_pool is not None:
                     clear_cache_pool()
-
-            if self.spec_algorithm.is_spectre():
-                self.reset_spectre_target_state()
 
             # TODO: allow optional empty cache
             torch.cuda.empty_cache()

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 
 import torch
@@ -13,6 +13,10 @@ class OnlineSoftmaxState:
     max_score: torch.Tensor
     normalizer: torch.Tensor
     weighted_value: torch.Tensor
+    # Private per-state device scratch. A cohort reuses it across all History
+    # transfers instead of allocating partial split-KV accumulators per chunk.
+    # The state belongs to one compute stream; it must not be updated concurrently.
+    workspace: dict = field(default_factory=dict, repr=False, compare=False)
 
 
 def _validate_inputs(

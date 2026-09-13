@@ -69,13 +69,15 @@ class CPUHistoryStore:
         head_dim: int,
         dtype: torch.dtype,
         device: torch.device | str,
+        allocation_group_chunks: int = 1,
     ) -> None:
-        if max_memory_bytes < 1 or chunk_tokens < 1:
+        if max_memory_bytes < 1 or chunk_tokens < 1 or allocation_group_chunks < 1:
             raise ValueError("CPU History budget and chunk size must be positive")
         if not layer_ids or kv_heads < 1 or head_dim < 1:
             raise ValueError("invalid Target KV geometry")
         self.max_memory_bytes = int(max_memory_bytes)
         self.chunk_tokens = int(chunk_tokens)
+        self.allocation_group_chunks = int(allocation_group_chunks)
         self.layer_ids = tuple(int(layer_id) for layer_id in layer_ids)
         self.kv_heads = int(kv_heads)
         self.head_dim = int(head_dim)
@@ -95,7 +97,13 @@ class CPUHistoryStore:
         self.bytes_reserved = 0
         self.bytes_used = 0
 
-    def _allocate_slab(self, rid: str, abs_start: int) -> tuple[int, _PackedSlab]:
+    def _allocate_slab(
+        self,
+        rid: str,
+        abs_start: int,
+        *,
+        tensor: torch.Tensor | None = None,
+    ) -> tuple[int, _PackedSlab]:
         shape = (
             len(self.layer_ids),
             self.chunk_tokens,
@@ -110,18 +118,9 @@ class CPUHistoryStore:
                 f"need {nbytes} bytes, available "
                 f"{self.max_memory_bytes - self.bytes_reserved}"
             )
-        pinned = bool(torch.cuda.is_available())
-        try:
-            tensor = torch.empty(
-                shape, dtype=self.dtype, device="cpu", pin_memory=pinned
-            )
-        except RuntimeError:
-            pinned = False
-            tensor = torch.empty(shape, dtype=self.dtype, device="cpu")
-            logger.warning(
-                "SpecStream could not allocate pinned CPU History; H2D copies "
-                "will use the pageable fallback"
-            )
+        if tensor is None:
+            tensor = self._allocate_backing(shape)
+        pinned = bool(tensor.is_pinned())
         slab_id = next(self._next_id)
         slab = _PackedSlab(
             tensor=tensor,
@@ -135,6 +134,28 @@ class CPUHistoryStore:
         self._request_slabs.setdefault(rid, []).append(slab_id)
         self.bytes_reserved += nbytes
         return slab_id, slab
+
+    def _allocate_backing(self, shape: tuple[int, ...]) -> torch.Tensor:
+        nbytes = _numel(shape) * torch.empty((), dtype=self.dtype).element_size()
+        if self.bytes_reserved + nbytes > self.max_memory_bytes:
+            raise MemoryError(
+                "SpecStream CPU History budget exceeded: "
+                f"need {nbytes} bytes, available "
+                f"{self.max_memory_bytes - self.bytes_reserved}"
+            )
+        try:
+            return torch.empty(
+                shape,
+                dtype=self.dtype,
+                device="cpu",
+                pin_memory=bool(torch.cuda.is_available()),
+            )
+        except RuntimeError:
+            logger.warning(
+                "SpecStream could not allocate pinned CPU History; H2D copies "
+                "will use the pageable fallback"
+            )
+            return torch.empty(shape, dtype=self.dtype, device="cpu")
 
     def seal_slots_async(
         self,
@@ -153,14 +174,43 @@ class CPUHistoryStore:
 
         block_ids: list[int] = []
         slabs_to_fill: list[tuple[_PackedSlab, int, int]] = []
+        copy_regions: list[tuple[torch.Tensor, int, int]] = []
         cursor = 0
         total = int(slots.numel())
-        while cursor < total:
-            take = min(self.chunk_tokens, total - cursor)
-            slab_id, slab = self._allocate_slab(rid, abs_start + cursor)
-            block_ids.append(slab_id)
-            slabs_to_fill.append((slab, cursor, take))
-            cursor += take
+        try:
+            while cursor < total:
+                group_take = min(
+                    self.chunk_tokens * self.allocation_group_chunks, total - cursor
+                )
+                group_capacity = (
+                    (group_take + self.chunk_tokens - 1) // self.chunk_tokens
+                ) * self.chunk_tokens
+                # One layer-major allocation keeps adjacent logical slabs
+                # adjacent in each layer. H2D can merge their views into one
+                # transfer without changing chunk size or a per-round pack.
+                backing = self._allocate_backing(
+                    (
+                        len(self.layer_ids),
+                        group_capacity,
+                        2,
+                        self.kv_heads,
+                        self.head_dim,
+                    )
+                )
+                copy_regions.append((backing, cursor, group_take))
+                for offset in range(0, group_take, self.chunk_tokens):
+                    take = min(self.chunk_tokens, group_take - offset)
+                    slab_id, slab = self._allocate_slab(
+                        rid,
+                        abs_start + cursor + offset,
+                        tensor=backing[:, offset : offset + self.chunk_tokens],
+                    )
+                    block_ids.append(slab_id)
+                    slabs_to_fill.append((slab, cursor + offset, take))
+                cursor += group_take
+        except Exception:
+            self._discard_new_slabs(rid, block_ids)
+            raise
 
         pending_sources: list[torch.Tensor] = []
         dependency_event = None
@@ -172,7 +222,7 @@ class CPUHistoryStore:
         )
 
         def enqueue_copies(*, non_blocking: bool) -> None:
-            for slab, source_offset, take in slabs_to_fill:
+            for backing, source_offset, take in copy_regions:
                 slab_slots = slots[source_offset : source_offset + take].long()
                 for layer_offset, layer_id in enumerate(self.layer_ids):
                     key = token_to_kv_pool.get_key_buffer(layer_id).index_select(
@@ -196,7 +246,7 @@ class CPUHistoryStore:
                             "Target KV geometry changed while sealing SpecStream "
                             "History"
                         )
-                    slab.tensor[layer_offset, :take].copy_(
+                    backing[layer_offset, :take].copy_(
                         packed, non_blocking=non_blocking
                     )
                     # ``packed`` is produced and consumed on d2h_stream.  Once
@@ -207,6 +257,7 @@ class CPUHistoryStore:
                     # the final event made seal scratch grow as O(num_layers)
                     # and caused high-concurrency OOMs.
 
+            for slab, _, take in slabs_to_fill:
                 slab.used_tokens = take
                 self.bytes_used += (
                     take
@@ -275,12 +326,16 @@ class CPUHistoryStore:
         rid: str,
         layer_id: int,
         *,
+        history_start: int = 0,
         history_end: int | None = None,
     ) -> Iterator[PackedLayerHistoryChunk]:
         try:
             layer_offset = self.layer_ids.index(int(layer_id))
         except ValueError as exc:
             raise IndexError(f"layer {layer_id} is outside SpecStream History") from exc
+        history_start = max(int(history_start), 0)
+        if history_end is not None and history_start > int(history_end):
+            raise ValueError("history_start cannot exceed history_end")
         expected_start = 0
         for slab_id in self._request_slabs.get(rid, ()):  # ordered prefix
             slab = self._slabs[slab_id]
@@ -293,17 +348,24 @@ class CPUHistoryStore:
                     f"non-contiguous CPU History for {rid}: expected {expected_start}, "
                     f"found {slab.abs_start}"
                 )
-            length = slab.used_tokens
+            slab_end = slab.abs_start + slab.used_tokens
+            if slab_end <= history_start:
+                expected_start = slab_end
+                continue
+            begin = max(slab.abs_start, history_start)
+            end = slab_end
             if history_end is not None:
-                length = min(length, max(0, history_end - slab.abs_start))
+                end = min(end, int(history_end))
+            length = max(0, end - begin)
             if length <= 0:
                 break
-            tensor = slab.tensor[layer_offset, :length]
+            offset = begin - slab.abs_start
+            tensor = slab.tensor[layer_offset, offset : offset + length]
             if not tensor.is_contiguous():
                 raise RuntimeError("packed CPU History chunk is not contiguous")
             yield PackedLayerHistoryChunk(
                 slab_id=slab_id,
-                abs_start=slab.abs_start,
+                abs_start=begin,
                 length=length,
                 tensor=tensor,
                 pinned=slab.pinned,

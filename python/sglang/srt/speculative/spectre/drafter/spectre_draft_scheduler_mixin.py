@@ -110,9 +110,36 @@ class SpectreDraftSchedulerMixin:
         )
         self._specstream_init_first_grant_gate()
 
-
     def _specstream_smctrl_enabled_for_draft(self) -> bool:
         return bool(getattr(self.server_args, "specstream_smctrl_enabled", False))
+
+    def _specstream_sync_control_clock(self) -> None:
+        if self.tp_size > 1 and self._specstream_grants_enabled:
+            now = broadcast_pyobj(
+                [time.monotonic_ns() // 1000] if self.tp_rank == 0 else [],
+                self.tp_group.rank, self.tp_cpu_group, src=self.tp_group.ranks[0],
+            )[0]
+            self._grant_table.control_now_us = int(now)
+
+    def _specstream_tp_launch_ready(self, reqs, grants) -> bool:
+        if self.tp_size == 1:
+            return True
+        signature = tuple((r.rid, int(r.spec_cnt), grants[r.rid].grant_epoch)
+                          for r in reqs if r.rid in grants)
+        valid = len(signature) == len(reqs) and all(
+            not grant.expired() for grant in grants.values()
+        )
+        states = self.tp_group.all_gather_object((signature, valid))
+        if any(item[0] != states[0][0] for item in states):
+            raise RuntimeError("Draft TP grant/request order diverged before launch")
+        return all(item[1] for item in states)
+
+    def _specstream_tp_completed_ms(self, elapsed_ms):
+        if self.tp_size > 1:
+            # Local stream completion precedes this barrier. ACK certifies all
+            # ranks, and the cost model sees the slowest rank, not just rank 0.
+            return max(self.tp_group.all_gather_object(float(elapsed_ms)))
+        return elapsed_ms
 
     def _specstream_calibration_tpcs(self) -> int:
         return int(
@@ -142,9 +169,7 @@ class SpectreDraftSchedulerMixin:
         if callable(fn):
             total_tpcs = fn()
 
-        self._specstream_draft_grant_gate = DraftGrantGate(
-            total_tpcs=total_tpcs
-        )
+        self._specstream_draft_grant_gate = DraftGrantGate(total_tpcs=total_tpcs)
 
         calibration_tpcs = self._specstream_calibration_tpcs()
         if calibration_tpcs > 0:
@@ -168,11 +193,7 @@ class SpectreDraftSchedulerMixin:
             reqs = batch
         else:
             reqs = getattr(batch, "reqs", ())
-        return tuple(
-            str(r.rid)
-            for r in reqs
-            if hasattr(r, "rid")
-        )
+        return tuple(str(r.rid) for r in reqs if hasattr(r, "rid"))
 
     def _specstream_existing_coexec_runtime(self):
         names = (
@@ -241,9 +262,7 @@ class SpectreDraftSchedulerMixin:
         if fn is not None:
             fn()
 
-    def _specstream_finish_one_granted_step(
-        self, batch, *, success: bool
-    ) -> None:
+    def _specstream_finish_one_granted_step(self, batch, *, success: bool) -> None:
         gate = getattr(self, "_specstream_draft_grant_gate", None)
         if gate is None:
             return
@@ -314,7 +333,6 @@ class SpectreDraftSchedulerMixin:
             if self.draft_forward_cycle % self.draft_cleanup_interval == 0:
                 self._cleanup_stale_draft_states()
 
-
     def _run_draft_priority_phase(self) -> None:
         saved_last_batch = self.last_batch
         self._filter_draft_batch()
@@ -346,9 +364,7 @@ class SpectreDraftSchedulerMixin:
                     break
                 self.draft_batch.prepare_for_decode()
                 result = self.run_batch(self.draft_batch)
-                self._process_draft_decode_result(
-                    self.draft_batch, result
-                )
+                self._process_draft_decode_result(self.draft_batch, result)
                 self._update_draft_batch_after_decode()
 
             self.last_batch = saved_last_batch
@@ -356,13 +372,17 @@ class SpectreDraftSchedulerMixin:
 
         # Target is the sole online/calibration grant authority.
         # ZMQ GRANT is installed in self._grant_table; consume exactly that
-        # epoch, run one token, synchronize, then ACK.
+        # epoch, run one token, synchronize, then ACK an exhausted lease.
+        # Catchup can retain permission across scheduler iterations; control
+        # messages are still polled between tokens and every launch rechecks
+        # the absolute deadline. SLACK_FILL remains a single-token lease.
         self._run_granted_draft_step()
         self.last_batch = saved_last_batch
 
     def _run_granted_draft_step(self) -> None:
         """Run at most one token and only for requests with an active grant."""
         saved_last_batch = self.last_batch
+        self._specstream_sync_control_clock()
         self._pause_ungranted_draft_reqs()
         self._filter_draft_batch()
         if self.draft_batch.is_empty():
@@ -377,13 +397,21 @@ class SpectreDraftSchedulerMixin:
             self._filter_draft_batch()
             self.last_batch = saved_last_batch
             return
-        if not self.draft_batch.check_decode_mem():
+        has_memory = self.draft_batch.check_decode_mem()
+        if self.tp_size > 1:
+            has_memory = all(self.tp_group.all_gather_object(has_memory))
+        if not has_memory:
             self._handle_draft_batch_oom()
             self.last_batch = saved_last_batch
             return
 
         self._apply_batch_grant_mask(grants.values())
         runnable_reqs = list(self.draft_batch.reqs)
+        if not self._specstream_tp_launch_ready(runnable_reqs, grants):
+            self.last_batch = saved_last_batch
+            return
+        # Commit the whole TP step before prepare_for_decode allocates KV or
+        # enqueues CUDA work. No rank may revoke this admitted step afterward.
         started = time.perf_counter()
         self.draft_batch.prepare_for_decode()
 
@@ -397,27 +425,32 @@ class SpectreDraftSchedulerMixin:
             self._specstream_end_controlled_forward()
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
+        elapsed_ms = self._specstream_tp_completed_ms(elapsed_ms)
 
         for req in runnable_reqs:
             grant = grants.get(req.rid)
             if grant is None:
                 continue
-            consumed = self._grant_table.consume_one(
-                req.rid,
-                spec_cnt=int(req.spec_cnt),
-                grant_epoch=grant.grant_epoch,
-            )
-            if not consumed:
-                raise RuntimeError(
-                    f"Draft grant changed during forward for request {req.rid}"
-                )
-            self._send_grant_ack(req, grant, elapsed_ms)
+            self._record_completed_grant_step(req, grant, elapsed_ms)
 
         # ACK is emitted after GPU completion but before a terminal DRAFT
         # response.  This preserves the protocol invariant that the next grant
         # cannot overtake completion of the previous quantum.
         self._process_draft_decode_result(self.draft_batch, result)
         for req in runnable_reqs:
+            grant = grants.get(req.rid)
+            if req.finished() and grant is not None:
+                self._close_grant_lease(req, grant, grant_state="EARLY_FINISH")
+            if (
+                grant is not None
+                and self._grant_table.remaining(
+                    req.rid, spec_cnt=grant.spec_cnt, grant_epoch=grant.grant_epoch
+                )
+                > 0
+            ):
+                # The scheduler will process incoming PAUSE/ABORT/REJECT
+                # before another one-token step under this catchup epoch.
+                continue
             if not req.finished():
                 req.draft_is_paused = True
                 state = self._get_draft_state(req.rid)
@@ -429,6 +462,65 @@ class SpectreDraftSchedulerMixin:
 
         self._update_draft_batch_after_decode()
         self.last_batch = saved_last_batch
+
+    def _record_completed_grant_step(
+        self,
+        req: Req,
+        grant: DraftExecutionGrant,
+        elapsed_ms: float,
+        *,
+        close: bool = False,
+        grant_state: Optional[str] = None,
+    ) -> None:
+        if not self._grant_table.consume_one(
+            req.rid, spec_cnt=grant.spec_cnt, grant_epoch=grant.grant_epoch
+        ):
+            raise RuntimeError(
+                f"Draft grant changed during forward for request {req.rid}"
+            )
+        if not hasattr(self, "_grant_lease_progress"):
+            self._grant_lease_progress = {}
+        key = (grant.request_id, grant.spec_cnt, grant.grant_epoch)
+        tokens, slowest_step_ms = self._grant_lease_progress.get(key, (0, 0.0))
+        self._grant_lease_progress[key] = (
+            tokens + 1,
+            max(slowest_step_ms, float(elapsed_ms)),
+        )
+        if (
+            close
+            or self._grant_table.remaining(
+                req.rid, spec_cnt=grant.spec_cnt, grant_epoch=grant.grant_epoch
+            )
+            == 0
+        ):
+            self._close_grant_lease(req, grant, grant_state=grant_state)
+
+    def _close_grant_lease(
+        self,
+        req: Optional[Req],
+        grant: DraftExecutionGrant,
+        *,
+        grant_state: Optional[str] = None,
+    ) -> None:
+        key = (grant.request_id, grant.spec_cnt, grant.grant_epoch)
+        progress = getattr(self, "_grant_lease_progress", {})
+        values = progress.pop(key, None)
+        current = self._grant_table.current(grant.request_id, spec_cnt=grant.spec_cnt)
+        active = current is not None and current.grant_epoch == grant.grant_epoch
+        # An exhausted lease already sent its ACK before result processing.
+        if values is None and not active:
+            return
+        self._grant_table.pause(
+            grant.request_id, spec_cnt=grant.spec_cnt, grant_epoch=grant.grant_epoch
+        )
+        tokens, slowest_step_ms = values or (0, 0.0)
+        self._send_grant_ack(
+            req,
+            grant,
+            slowest_step_ms,
+            grant_tokens=tokens,
+            grant_state=grant_state,
+        )
 
     def _active_grants_for_batch(
         self, batch: ScheduleBatch
@@ -456,9 +548,7 @@ class SpectreDraftSchedulerMixin:
                 self.draft_paused_reqs.append(req)
 
     def _ack_expired_grant(self, req: Req) -> bool:
-        expired = self._grant_table.pop_expired(
-            req.rid, spec_cnt=int(req.spec_cnt)
-        )
+        expired = self._grant_table.pop_expired(req.rid, spec_cnt=int(req.spec_cnt))
         if expired is None:
             return False
         # A deadline can expire while the message is in ZMQ or while Target
@@ -466,12 +556,12 @@ class SpectreDraftSchedulerMixin:
         # grant strands Target's outstanding epoch and prevents it from issuing
         # DRAFT_CATCHUP.  A zero-token ACK reports that no CUDA work launched
         # and safely reopens the one-token sequencer.
+        key = (expired.request_id, expired.spec_cnt, expired.grant_epoch)
+        tokens, slowest_step_ms = getattr(self, "_grant_lease_progress", {}).pop(
+            key, (0, 0.0)
+        )
         self._send_grant_ack(
-            req,
-            expired,
-            0.0,
-            grant_tokens=0,
-            grant_state="EXPIRED",
+            req, expired, slowest_step_ms, grant_tokens=tokens, grant_state="EXPIRED"
         )
         if self.tp_rank == 0:
             logger.debug(
@@ -511,7 +601,7 @@ class SpectreDraftSchedulerMixin:
 
     def _send_grant_ack(
         self,
-        req: Req,
+        req: Optional[Req],
         grant: DraftExecutionGrant,
         elapsed_ms: float,
         *,
@@ -525,8 +615,11 @@ class SpectreDraftSchedulerMixin:
         self.zmq_communicator.send_objs(
             [
                 SpectreRequest(
-                    request_id=req.rid,
-                    spec_cnt=int(req.spec_cnt),
+                    # A disposition ACK may describe a grant superseded by a
+                    # newer request round. Preserve the authorization key
+                    # from the grant instead of the request's current round.
+                    request_id=grant.request_id,
+                    spec_cnt=int(grant.spec_cnt),
                     action=SpectreAction.GRANT_ACK,
                     spec_type=SpecType.DRAFT_RESPONSE,
                     grant_epoch=grant.grant_epoch,
@@ -542,8 +635,8 @@ class SpectreDraftSchedulerMixin:
             logger.debug(
                 "[Draft][Grant] ACK rid=%s spec_cnt=%s epoch=%s tokens=%s "
                 "state=%s step_ms=%.3f",
-                req.rid,
-                req.spec_cnt,
+                grant.request_id,
+                grant.spec_cnt,
                 grant.grant_epoch,
                 grant_tokens,
                 grant_state or grant.grant_state,
@@ -623,6 +716,7 @@ class SpectreDraftSchedulerMixin:
             self.running_batch.filter_batch(keep_indices=keep)
 
     def _prefill_draft_reqs(self) -> None:
+        self._specstream_sync_control_clock()
         if not self.draft_waiting_queue:
             return
 
@@ -686,6 +780,10 @@ class SpectreDraftSchedulerMixin:
         if not admitted:
             return
 
+        if grants is not None and not self._specstream_tp_launch_ready(admitted, grants):
+            self.draft_waiting_queue[0:0] = admitted
+            return
+
         # Prefill was already authorized above by a Target-issued
         # DRAFT_CATCHUP grant in self._grant_table.  Do not require a second
         # process-local DraftGrantGate.
@@ -721,19 +819,16 @@ class SpectreDraftSchedulerMixin:
         if self._specstream_grants_enabled:
             self._synchronize_specstream_draft_stream()
             elapsed_ms = (time.perf_counter() - started) * 1000.0
+            elapsed_ms = self._specstream_tp_completed_ms(elapsed_ms)
             for req in admitted:
                 grant = grants.get(req.rid)
                 if grant is None:
                     continue
-                if not self._grant_table.consume_one(
-                    req.rid,
-                    spec_cnt=int(req.spec_cnt),
-                    grant_epoch=grant.grant_epoch,
-                ):
-                    raise RuntimeError(
-                        f"Draft grant changed during prefill for request {req.rid}"
-                    )
-                self._send_grant_ack(req, grant, elapsed_ms)
+                # Prefill has no per-token cost model. Close its lease after
+                # one result and return any unused budget to Target.
+                self._record_completed_grant_step(
+                    req, grant, elapsed_ms, close=True, grant_state="PREFILL_COMPLETE"
+                )
 
         self._process_draft_prefill_result(draft_prefill_batch, result)
         if self._specstream_grants_enabled:
@@ -856,6 +951,7 @@ class SpectreDraftSchedulerMixin:
         return batch
 
     def recv_and_process_draft_requests(self) -> None:
+        self._specstream_sync_control_clock()
         if self.tp_size == 1:
             if not hasattr(self, "zmq_communicator") or self.zmq_communicator is None:
                 return
@@ -961,7 +1057,6 @@ class SpectreDraftSchedulerMixin:
                     logger.debug(
                         f"[Draft] Received {action} for {draft_req.request_id}"
                     )
-                self._grant_table.release(draft_req.request_id)
                 self._finish_draft_request(draft_req.request_id)
             elif action == SpectreAction.GRANT:
                 if not self._specstream_grants_enabled:
@@ -987,7 +1082,33 @@ class SpectreDraftSchedulerMixin:
                         logger.warning("[Draft][Grant] invalid grant ignored: %s", exc)
                     continue
                 applied = self._grant_table.apply(grant)
+                if applied.superseded is not None:
+                    # A catchup lease may have a completed prefix. Account it
+                    # before replacing the request round; never replay it.
+                    old = applied.superseded
+                    progress_key = (old.request_id, old.spec_cnt, old.grant_epoch)
+                    tokens, slowest_step_ms = getattr(
+                        self, "_grant_lease_progress", {}
+                    ).pop(progress_key, (0, 0.0))
+                    self._send_grant_ack(
+                        None,
+                        old,
+                        slowest_step_ms,
+                        grant_tokens=tokens,
+                        grant_state="SUPERSEDED",
+                    )
                 if not applied.accepted:
+                    if applied.reason == "stale_spec_cnt":
+                        # This grant arrived after the request advanced and was
+                        # never admitted to CUDA work. Do not strand Target's
+                        # issued epoch without a terminal disposition.
+                        self._send_grant_ack(
+                            None,
+                            grant,
+                            0.0,
+                            grant_tokens=0,
+                            grant_state="SUPERSEDED",
+                        )
                     if self.tp_rank == 0:
                         logger.debug(
                             "[Draft][Grant] ignored %s grant rid=%s epoch=%s",
@@ -1007,7 +1128,8 @@ class SpectreDraftSchedulerMixin:
             elif action == SpectreAction.PAUSE:
                 if not self._specstream_grants_enabled:
                     continue
-                self._grant_table.pause(
+                grant = self._grant_table.current(str(draft_req.request_id))
+                paused = self._grant_table.pause(
                     str(draft_req.request_id),
                     spec_cnt=(
                         int(draft_req.spec_cnt)
@@ -1020,8 +1142,27 @@ class SpectreDraftSchedulerMixin:
                         else None
                     ),
                 )
+                if paused and grant is not None:
+                    key = (grant.request_id, grant.spec_cnt, grant.grant_epoch)
+                    tokens, slowest_step_ms = getattr(
+                        self, "_grant_lease_progress", {}
+                    ).pop(key, (0, 0.0))
+                    self._send_grant_ack(
+                        None,
+                        grant,
+                        slowest_step_ms,
+                        grant_tokens=tokens,
+                        grant_state="PAUSED",
+                    )
+                if grant is not None and not paused:
+                    # An older PAUSE must not suspend a newer active epoch.
+                    continue
                 state = self._get_draft_state(str(draft_req.request_id))
                 if state is not None and state.req_object is not None:
+                    if draft_req.spec_cnt is not None and int(draft_req.spec_cnt) < int(
+                        state.req_object.spec_cnt
+                    ):
+                        continue
                     self._pause_req(state.req_object, state)
 
     def _process_draft_requests(self, latest_msgs: Dict[str, SpectreRequest]) -> None:
@@ -1043,6 +1184,7 @@ class SpectreDraftSchedulerMixin:
                             logger.warning(
                                 f"[Draft] {req_id}: no state and no input_ids, skipping"
                             )
+                        self._send_need_context_response(draft_req)
                         continue
                     self._create_new_draft_req(draft_req)
                     continue
@@ -1109,6 +1251,26 @@ class SpectreDraftSchedulerMixin:
                     self._finish_draft_request(req_id)
                 except Exception:
                     pass
+
+    def _send_need_context_response(self, draft_req: SpectreRequest) -> None:
+        """Ask Target to resync instead of waiting for an impossible draft."""
+
+        if self.tp_size > 1 and self.tp_rank != 0:
+            return
+        if not hasattr(self, "zmq_communicator") or self.zmq_communicator is None:
+            return
+        self.zmq_communicator.send_objs(
+            [
+                SpectreRequest(
+                    request_id=draft_req.request_id,
+                    spec_cnt=draft_req.spec_cnt,
+                    action=SpectreAction.NEED_CONTEXT,
+                    spec_type=SpecType.DRAFT_RESPONSE,
+                    target_send_time=draft_req.target_send_time,
+                    draft_recv_time=draft_req.draft_recv_time,
+                )
+            ]
+        )
 
     def _find_fork_point(
         self,
@@ -1522,6 +1684,12 @@ class SpectreDraftSchedulerMixin:
         return False
 
     def _send_draft_response(self, req: Req) -> None:
+        if hasattr(self, "_grant_table"):
+            grant = self._grant_table.current(req.rid, spec_cnt=int(req.spec_cnt))
+            if grant is not None:
+                # The candidate horizon can complete before a lease budget.
+                # Its disposition ACK must precede the terminal DRAFT reply.
+                self._close_grant_lease(req, grant, grant_state="EARLY_FINISH")
         draft_tokens = req.output_ids[req.draft_generation_start_len :]
 
         draft_logits: List[float] = []
@@ -1643,6 +1811,9 @@ class SpectreDraftSchedulerMixin:
 
     def _finish_draft_request(self, req_id: str) -> None:
         if hasattr(self, "_grant_table"):
+            grant = self._grant_table.current(req_id)
+            if grant is not None:
+                self._close_grant_lease(None, grant, grant_state="FINISHED")
             self._grant_table.release(req_id)
         state = self._get_draft_state(req_id)
         if state is None:
@@ -1665,7 +1836,11 @@ class SpectreDraftSchedulerMixin:
             logger.debug(f"[Draft][Finish] {req_id=}")
 
     def _cleanup_stale_draft_states(self) -> None:
-        for req_id in self.draft_state_manager.cleanup_stale_states():
+        stale = self.draft_state_manager.cleanup_stale_states() if self.tp_rank == 0 else []
+        if self.tp_size > 1:
+            stale = broadcast_pyobj(list(stale), self.tp_group.rank,
+                                    self.tp_cpu_group, src=self.tp_group.ranks[0])
+        for req_id in stale:
             try:
                 self._finish_draft_request(req_id)
             except Exception as e:

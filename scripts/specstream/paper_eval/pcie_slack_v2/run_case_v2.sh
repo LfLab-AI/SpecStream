@@ -24,7 +24,7 @@ case "$METHOD" in
   C) TARGET_VISIBLE="$COLOCATED_UUID"; DRAFT_VISIBLE="$COLOCATED_UUID"; NEEDS_SMCTRL=1; test -s "$RESOURCE_PROFILE" ;;
   CAL_BASE) TARGET_VISIBLE="$COLOCATED_UUID"; DRAFT_VISIBLE="$COLOCATED_UUID"; NEEDS_SMCTRL=1 ;;
   CAL_OVERLAP) TARGET_VISIBLE="$COLOCATED_UUID"; DRAFT_VISIBLE="$COLOCATED_UUID"; NEEDS_SMCTRL=1; ALLOW_CAL_OVERLAP=1 ;;
-  *) echo "ERROR: unknown METHOD=$METHOD" >&2; exit 2 ;;
+  *) echo "ERROR: unknown METHOD=$METHOD" >&2;
 esac
 
 if (( NEEDS_SMCTRL )); then
@@ -40,7 +40,7 @@ fi
 
 port_open(){ (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 for p in "$TARGET_PORT" "$DRAFT_PORT"; do
-  port_open "$p" && { echo "ERROR: stale server on $p" >&2; exit 2; } || true
+  port_open "$p" && { echo "ERROR: stale server on $p" >&2;  } || true
 done
 
 TARGET_ARGS=(

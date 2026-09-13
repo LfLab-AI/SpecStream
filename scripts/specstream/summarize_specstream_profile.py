@@ -95,6 +95,10 @@ def summarize(path: Path, *, h2d_gbps: float = 0.0) -> dict[str, object]:
         ),
         "p95_network_wait_ms": percentile(network_wait_ms, 0.95),
         "max_draft_rtt_p95_ms": max(draft_rtt_p95, default=0.0),
+        "draft_rtt_by_q": rows[-1].get("draft_rtt_by_q", "") if rows else "",
+        "controller_candidate_costs": (
+            rows[-1].get("controller_candidate_costs", "") if rows else ""
+        ),
         "max_draft_timeout_rate": max(timeout_rates, default=0.0),
         "max_tp_rank_skew_ms": max(rank_skews, default=0.0),
         "max_tp_target_slowdown": max(target_slowdowns, default=0.0),
@@ -156,6 +160,8 @@ def main() -> int:
         "mean_network_wait_ms",
         "p95_network_wait_ms",
         "max_draft_rtt_p95_ms",
+        "draft_rtt_by_q",
+        "controller_candidate_costs",
         "max_draft_timeout_rate",
         "max_tp_rank_skew_ms",
         "max_tp_target_slowdown",

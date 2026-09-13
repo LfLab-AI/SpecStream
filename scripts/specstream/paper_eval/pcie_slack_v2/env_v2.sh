@@ -21,7 +21,7 @@ export SPECSTREAM_SESSION_ID="${SPECSTREAM_SESSION_ID:-$(date +%Y%m%d_%H%M%S)}"
 export TEST_ROOT="${TEST_ROOT:-$REPO_ROOT/results/specstream_pcie_slack_v2/$SPECSTREAM_SESSION_ID}"
 export RESOURCE_PROFILE="$TEST_ROOT/resource/history_h2d_profile.json"
 export SMCTRL_LIB="$REPO_ROOT/csrc/specstream_smctrl/build/libsmctrl.so"
-export CALIBRATION_TPCS="${CALIBRATION_TPCS:-16}"
+export CALIBRATION_TPCS="${CALIBRATION_TPCS:-27}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 
 # 这里只保存路径，不 export CUDA_MPS_* 到登录 Shell。

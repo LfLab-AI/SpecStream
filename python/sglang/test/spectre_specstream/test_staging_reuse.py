@@ -109,3 +109,98 @@ def test_h2d_calibration_is_disabled_for_cpu_staging():
     staging.reserve((8, 2, 1, 2), torch.float32)
 
     assert staging.calibrate_h2d_gbps() == 0.0
+
+
+def test_adjacent_history_views_coalesce_without_copying_padding():
+    staging = StagingWindowPool(2, "cpu")
+    storage = torch.arange(12 * 4).reshape(12, 2, 2).float()
+    groups = [[storage[:3], storage[3:8]], [storage[8:11]]]
+    transfer = staging.submit_cohort_groups_direct_async(groups, 0)
+    assert transfer.source_count == 3
+    assert transfer.dma_count == 3  # two contiguous KV regions + metadata
+    assert transfer.source_nbytes == storage[:11].nbytes
+    assert transfer.padding_nbytes == 0
+    assert transfer.nbytes == storage[:11].nbytes + 8
+    torch.testing.assert_close(transfer.tensor[0, :8], storage[:8])
+    torch.testing.assert_close(transfer.tensor[1, :3], storage[8:11])
+
+
+def test_packed_ragged_cohort_does_not_transfer_masked_padding():
+    staging = StagingWindowPool(2, "cpu")
+    groups = [[torch.ones(8, 2, 2)], [torch.ones(2, 2, 2)], []]
+    transfer = staging.submit_cohort_groups(groups, 0)
+    assert transfer.nbytes == 10 * 2 * 2 * 4 + 3 * 4
+    assert transfer.nbytes < transfer.tensor.nbytes
+    assert transfer.dma_count == 3
+    assert transfer.padding_nbytes == 0
+
+
+def test_immutable_metadata_reuse_survives_slot_reuse_and_bounded_eviction():
+    staging = StagingWindowPool(2, "cpu", metadata_cache_entries=2)
+    first = staging.submit_cohort_groups_direct_async(
+        [[torch.ones(4, 2)], [torch.ones(3, 2)]], 0
+    )
+    staging.mark_consumed(first)
+    same = staging.submit_cohort_groups_direct_async(
+        [[torch.ones(4, 2)], [torch.ones(3, 2)]], 1
+    )
+    assert same.metadata_cache_hit
+    assert same.valid_tokens is first.valid_tokens
+    assert same.host_wait_ms == 0
+    assert same.nbytes == same.source_nbytes
+    for length in (2, 1, 4):
+        staging.submit_cohort_groups_direct_async([[torch.ones(length, 2)], []], 0)
+    assert len(staging._metadata_cache) == 2
+    # Older transfer references retain immutable values after eviction.
+    torch.testing.assert_close(first.valid_tokens, torch.tensor([4, 3], dtype=torch.int32))
+
+
+def test_metadata_eviction_waits_only_for_evicted_host_upload():
+    staging = StagingWindowPool(2, "cpu", metadata_cache_entries=1)
+    first, _, _ = staging._immutable_valid_lengths((4, 3))
+
+    class PendingUpload:
+        waited = False
+
+        def query(self):
+            return False
+
+        def synchronize(self):
+            self.waited = True
+
+    upload = PendingUpload()
+    first.ready_event = upload
+    hit, cached, wait_ms = staging._immutable_valid_lengths((4, 3))
+    assert hit is first and cached and wait_ms == 0
+    assert not upload.waited
+    staging._immutable_valid_lengths((3, 2))
+    assert upload.waited
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_direct_metadata_and_gpu_slot_lifetimes_under_queued_consumers():
+    staging = StagingWindowPool(2, "cuda", metadata_cache_entries=2)
+    staging.reserve((2, 16, 2, 2), torch.float32)
+    snapshots = []
+    sources = []
+    for step in range(24):
+        first_len, second_len = 12 + step % 3, 3 + step % 5
+        source = torch.full((first_len + second_len, 2, 2), float(step), pin_memory=True)
+        sources.append(source)
+        transfer = staging.submit_cohort_groups_direct_async(
+            [[source[:first_len]], [source[first_len:]]], step % 2
+        )
+        packed = staging.wait_ready(transfer)
+        # Delay consumers enough to exercise allocator/cache eviction while
+        # previous uses of immutable device metadata remain queued.
+        torch.cuda._sleep(100_000)
+        snapshots.append((
+            packed[0, :first_len].clone(), packed[1, :second_len].clone(),
+            transfer.valid_tokens.clone(), first_len, second_len, step,
+        ))
+        staging.mark_consumed(transfer)
+    torch.cuda.synchronize()
+    for first, second, lengths, nfirst, nsecond, step in snapshots:
+        torch.testing.assert_close(first.cpu(), torch.full((nfirst, 2, 2), float(step)))
+        torch.testing.assert_close(second.cpu(), torch.full((nsecond, 2, 2), float(step)))
+        torch.testing.assert_close(lengths.cpu(), torch.tensor([nfirst, nsecond], dtype=torch.int32))

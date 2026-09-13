@@ -38,6 +38,19 @@ def test_stale_epoch_and_spec_count_are_rejected():
     assert table.apply(_grant(5, spec_cnt=2)).reason == "stale_spec_cnt"
 
 
+def test_newer_round_reports_the_unconsumed_grant_it_superseded():
+    table = DraftGrantTable()
+    old = _grant(4, spec_cnt=3)
+    new = _grant(5, spec_cnt=4)
+
+    assert table.apply(old).accepted
+    result = table.apply(new)
+
+    assert result.accepted
+    assert result.superseded == old
+    assert table.active("r1", spec_cnt=4) == new
+
+
 def test_expired_grant_fails_closed():
     table = DraftGrantTable()
     table.apply(_grant(deadline_us=100))

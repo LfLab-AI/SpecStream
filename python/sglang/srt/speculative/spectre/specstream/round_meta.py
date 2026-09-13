@@ -13,6 +13,7 @@ class SpecStreamRequestMeta:
     history_len: int
     logical_len: int
     stream_enabled: bool
+    gpu_history_len: int = 0
 
     @property
     def q_len(self) -> int:
@@ -21,6 +22,10 @@ class SpecStreamRequestMeta:
     @property
     def tail_tokens(self) -> int:
         return self.logical_len - self.history_len
+
+    @property
+    def cpu_history_len(self) -> int:
+        return self.history_len - self.gpu_history_len
 
 
 @dataclass(frozen=True)
@@ -40,6 +45,14 @@ class SpecStreamRoundMeta:
     @property
     def history_tokens(self) -> int:
         return sum(item.history_len for item in self.items)
+
+    @property
+    def gpu_history_tokens(self) -> int:
+        return sum(item.gpu_history_len for item in self.items)
+
+    @property
+    def cpu_history_tokens(self) -> int:
+        return sum(item.cpu_history_len for item in self.items)
 
     @property
     def context_tokens(self) -> int:

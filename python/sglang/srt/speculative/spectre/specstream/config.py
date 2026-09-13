@@ -46,11 +46,15 @@ class SpecStreamConfig:
     num_buffers: int = 2
     chunks_per_transfer: int = 4
     layer_prefetch: bool = True
+    serialize_h2d: bool = False
     active_tail_tokens: int = 512
     min_history_tokens: int = 8192
+    gpu_history_cache_tokens: int = 49152
+    gpu_history_min_free_tokens: int = 0
     cpu_memory_gb: int = 128
     default_q: int = 5
     dynamic_q: bool = False
+    force_ordinary_mode: bool = False
     q_candidates: tuple[int, ...] = (1, 2, 4, 6, 8)
     q_switch_threshold: float = 0.08
     coexec_enabled: bool = False
@@ -60,6 +64,7 @@ class SpecStreamConfig:
     coexec_compute_ratio_threshold: float = 0.90
     coexec_require_mps: bool = False
     pcie_slack_coexec: bool = False
+    pcie_grant_poll_us: int = 200
     smctrl_enabled: bool = False
     grant_token_quantum: int = 1
     coexec_target_slowdown_budget: float = 0.05
@@ -93,10 +98,25 @@ class SpecStreamConfig:
             raise ValueError("specstream_num_buffers must be positive")
         if self.chunks_per_transfer < 1:
             raise ValueError("specstream_chunks_per_transfer must be positive")
+        if self.serialize_h2d and self.num_buffers != 1:
+            raise ValueError("serialized SpecStream H2D requires exactly one buffer")
+        if self.serialize_h2d and self.layer_prefetch:
+            raise ValueError(
+                "serialized SpecStream H2D is incompatible with layer prefetch"
+            )
         if self.active_tail_tokens < 0:
             raise ValueError("specstream_active_tail_tokens cannot be negative")
         if self.min_history_tokens < 0:
             raise ValueError("specstream_min_history_tokens cannot be negative")
+        if self.gpu_history_cache_tokens < -1:
+            raise ValueError(
+                "specstream_gpu_history_cache_tokens must be -1 (auto), zero "
+                "(disabled), or a positive global token budget"
+            )
+        if self.gpu_history_min_free_tokens < 0:
+            raise ValueError(
+                "specstream_gpu_history_min_free_tokens cannot be negative"
+            )
         if self.cpu_memory_gb < 1:
             raise ValueError("specstream_cpu_memory_gb must be positive")
         if self.default_q < 1:
@@ -113,12 +133,16 @@ class SpecStreamConfig:
             raise ValueError(
                 "specstream_coexec_pending_high_watermark must be positive"
             )
+        if not 25 <= self.pcie_grant_poll_us <= 10_000:
+            raise ValueError(
+                "specstream_pcie_grant_poll_us must be between 25 and 10000"
+            )
         if not 0.0 < self.coexec_compute_ratio_threshold <= 1.0:
             raise ValueError(
                 "specstream_coexec_compute_ratio_threshold must be in (0, 1]"
             )
-        if self.grant_token_quantum != 1:
-            raise ValueError("SpecStream v1 grant_token_quantum must equal 1")
+        if not 1 <= self.grant_token_quantum <= 8:
+            raise ValueError("SpecStream grant_token_quantum must be between 1 and 8")
         if not 0.0 <= self.coexec_target_slowdown_budget <= 1.0:
             raise ValueError(
                 "specstream_coexec_target_slowdown_budget must be in [0, 1]"
@@ -131,7 +155,7 @@ class SpecStreamConfig:
             raise ValueError("specstream_smctrl_mask_scope must be stream or global")
         if self.smctrl_calibration_allow_overlap and self.smctrl_calibration_tpcs < 1:
             raise ValueError(
-                "calibration overlap requires --specstream-smctrl-calibration-tpcs"
+                "fixed-TPC overlap requires --specstream-smctrl-calibration-tpcs"
             )
         if (
             self.smctrl_enabled
@@ -237,11 +261,19 @@ class SpecStreamConfig:
             num_buffers=int(server_args.specstream_num_buffers),
             chunks_per_transfer=int(server_args.specstream_chunks_per_transfer),
             layer_prefetch=bool(server_args.specstream_layer_prefetch),
+            serialize_h2d=bool(server_args.specstream_serialize_h2d),
             active_tail_tokens=int(server_args.specstream_active_tail_tokens),
             min_history_tokens=int(server_args.specstream_min_history_tokens),
+            gpu_history_cache_tokens=int(
+                server_args.specstream_gpu_history_cache_tokens
+            ),
+            gpu_history_min_free_tokens=int(
+                server_args.specstream_gpu_history_min_free_tokens
+            ),
             cpu_memory_gb=int(server_args.specstream_cpu_memory_gb),
             default_q=int(server_args.speculative_num_steps) + 1,
             dynamic_q=bool(server_args.specstream_dynamic_q),
+            force_ordinary_mode=bool(server_args.specstream_force_ordinary_mode),
             q_candidates=parse_q_candidates(server_args.specstream_q_candidates),
             q_switch_threshold=float(server_args.specstream_q_switch_threshold),
             coexec_enabled=bool(server_args.specstream_coexec_enabled),
@@ -259,6 +291,7 @@ class SpecStreamConfig:
             ),
             coexec_require_mps=bool(server_args.specstream_coexec_require_mps),
             pcie_slack_coexec=bool(server_args.specstream_pcie_slack_coexec),
+            pcie_grant_poll_us=int(server_args.specstream_pcie_grant_poll_us),
             smctrl_enabled=bool(server_args.specstream_smctrl_enabled),
             grant_token_quantum=int(server_args.specstream_grant_token_quantum),
             coexec_target_slowdown_budget=float(

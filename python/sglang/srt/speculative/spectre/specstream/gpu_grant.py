@@ -31,8 +31,10 @@ class DraftExecutionGrant:
             raise ValueError("spec_cnt cannot be negative")
         if self.grant_epoch < 1:
             raise ValueError("grant_epoch must be positive")
-        if self.grant_tokens != 1:
-            raise ValueError("SpecStream v1 grants exactly one token")
+        if not 1 <= self.grant_tokens <= 8:
+            raise ValueError("SpecStream grants require 1 to 8 tokens")
+        if self.grant_tokens != 1 and self.grant_state != "DRAFT_CATCHUP":
+            raise ValueError("SpecStream overlap grants exactly one token")
         if self.tpc_low < 0 or self.tpc_high <= self.tpc_low:
             raise ValueError("TPC range must satisfy 0 <= low < high")
         if self.deadline_us is not None and self.deadline_us < 0:
@@ -52,6 +54,7 @@ class DraftExecutionGrant:
 class GrantApplyResult:
     accepted: bool
     reason: str
+    superseded: DraftExecutionGrant | None = None
 
 
 class DraftGrantTable:
@@ -61,6 +64,10 @@ class DraftGrantTable:
         self._active: dict[str, DraftExecutionGrant] = {}
         self._latest_epoch: dict[str, int] = {}
         self._latest_spec_cnt: dict[str, int] = {}
+        self._remaining: dict[str, int] = {}
+        # TP schedulers install one shared timestamp before control decisions.
+        # A separate collective rechecks real-time validity at launch.
+        self.control_now_us: int | None = None
 
     def apply(self, grant: DraftExecutionGrant) -> GrantApplyResult:
         latest_spec_cnt = self._latest_spec_cnt.get(grant.request_id, -1)
@@ -69,10 +76,12 @@ class DraftGrantTable:
             return GrantApplyResult(False, "stale_spec_cnt")
         if grant.spec_cnt == latest_spec_cnt and grant.grant_epoch <= latest_epoch:
             return GrantApplyResult(False, "stale_epoch")
+        previous = self._active.get(grant.request_id)
         self._latest_spec_cnt[grant.request_id] = grant.spec_cnt
         self._latest_epoch[grant.request_id] = grant.grant_epoch
         self._active[grant.request_id] = grant
-        return GrantApplyResult(True, "accepted")
+        self._remaining[grant.request_id] = grant.grant_tokens
+        return GrantApplyResult(True, "accepted", superseded=previous)
 
     def pause(
         self,
@@ -89,10 +98,12 @@ class DraftGrantTable:
         if grant_epoch is not None and grant_epoch < current.grant_epoch:
             return False
         self._active.pop(request_id, None)
+        self._remaining.pop(request_id, None)
         return True
 
     def release(self, request_id: str) -> None:
         self._active.pop(request_id, None)
+        self._remaining.pop(request_id, None)
         self._latest_epoch.pop(request_id, None)
         self._latest_spec_cnt.pop(request_id, None)
 
@@ -108,9 +119,28 @@ class DraftGrantTable:
             return None
         if spec_cnt is not None and grant.spec_cnt != spec_cnt:
             return None
-        if grant.expired(now_us):
+        if grant.expired(self.control_now_us if now_us is None else now_us):
             return None
         return grant
+
+    def current(
+        self, request_id: str, *, spec_cnt: int | None = None
+    ) -> DraftExecutionGrant | None:
+        """Inspect an epoch for terminal disposition, including expired leases."""
+        grant = self._active.get(request_id)
+        if grant is not None and (spec_cnt is None or grant.spec_cnt == spec_cnt):
+            return grant
+        return None
+
+    def remaining(self, request_id: str, *, spec_cnt: int, grant_epoch: int) -> int:
+        grant = self._active.get(request_id)
+        if (
+            grant is None
+            or grant.spec_cnt != spec_cnt
+            or grant.grant_epoch != grant_epoch
+        ):
+            return 0
+        return self._remaining.get(request_id, 0)
 
     def pop_expired(
         self,
@@ -130,9 +160,10 @@ class DraftGrantTable:
             return None
         if spec_cnt is not None and grant.spec_cnt != spec_cnt:
             return None
-        if not grant.expired(now_us):
+        if not grant.expired(self.control_now_us if now_us is None else now_us):
             return None
         self._active.pop(request_id, None)
+        self._remaining.pop(request_id, None)
         return grant
 
     def active_for(
@@ -165,9 +196,14 @@ class DraftGrantTable:
             or grant.grant_epoch != grant_epoch
         ):
             return False
-        # v1 grants are exactly one token, so successful consumption always
-        # removes the entry before another CUDA forward can be launched.
-        self._active.pop(request_id, None)
+        remaining = self._remaining.get(request_id, 0) - 1
+        if remaining < 0:
+            return False
+        if remaining:
+            self._remaining[request_id] = remaining
+        else:
+            self._active.pop(request_id, None)
+            self._remaining.pop(request_id, None)
         return True
 
     def __len__(self) -> int:
