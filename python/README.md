@@ -2,121 +2,207 @@
 
 ## Method overview
 
-SpecStream extends SGLang with memory-efficient speculative decoding on shared
-GPUs. It separates committed history KV from the rollback-sensitive GPU frontier,
-streams history blocks through grouped transfers and staging buffers, and combines
-partial attention results with online softmax. A controller adjusts verification
-width and admits Draft work subject to Target progress, timing, and resource limits.
+SpecStream extends [SGLang](https://github.com/sgl-project/sglang) with
+memory-efficient speculative decoding on shared GPUs. It keeps the active KV
+frontier on the GPU and streams committed history from host memory. Grouped
+transfers, staging buffers, and online softmax combine the attention results
+across history blocks. The runtime adjusts verification width and schedules
+Draft computation in available Target transfer windows, using timing estimates
+and GPU resource limits to decide which work to admit.
 
-This release contains the language-model runtime and the SpecStream extensions.
-The implementation is under `python/sglang/srt/speculative/spectre/specstream/`.
-The surrounding `spectre` module and command-line identifiers are retained for
-runtime and protocol compatibility. The SM-control extension is under
-`csrc/specstream_smctrl/`. Copyright and third-party notices are retained in
-`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and the original source headers.
+The implementation is in
+`python/sglang/srt/speculative/spectre/specstream/`, with GPU resource control in
+`csrc/specstream_smctrl/`.
 
 ## Environment
 
-The reference environment uses Linux x86-64, Python 3.12, PyTorch 2.9.1 with
-CUDA 12.8, Transformers 5.3.0, and two NVIDIA A800 80 GB GPUs for the shared-GPU
-configuration. The SGLang base version is 0.5.17. The GPU-independent smoke tests
-also run without CUDA. A compatible compiler, CUDA toolkit, and NVIDIA driver
-are required to build and validate the GPU extensions.
+The reference setup uses two NVIDIA A800 80 GB GPUs, with both Target and Draft
+running at tensor-parallel size 2 on the same devices.
 
-Use local model directories and paths belonging to your own machine. No model
-weights, prepared datasets, result files, or machine-specific benchmark matrices
-are included. Tensor-parallel size, memory budgets, GPU selection, and TPC limits
-must match the deployment. Model pairs must have compatible token IDs, special
-tokens, and prompt templates; belonging to the same model family is insufficient.
+| Component | Reference version |
+| --- | --- |
+| OS | Linux x86-64 |
+| Python | 3.12 |
+| PyTorch | 2.9.1 + CUDA 12.8 |
+| Transformers | 5.3.0 |
+| SGLang base | 0.5.17 |
+| GPU architecture | SM80 |
+
+The examples below use a local Qwen3-32B Target and Qwen3-0.6B Draft. Set the
+model paths, GPU selection, and memory settings for your deployment. The startup
+script checks the pair's token mappings, special tokens, and chat templates.
 
 ## Installation and compilation
 
-Run the commands from this repository's root. Activate an isolated Python 3.12
-environment first. On Debian/Ubuntu, install the native build prerequisites:
+Run these commands from the repository root in a Python 3.12 environment:
 
 ```bash
+conda create -n specstream python=3.12 -y
+conda activate specstream
 sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libzmq3-dev cppzmq-dev libmsgpack-dev
 python -m pip install --upgrade pip
 SETUPTOOLS_SCM_PRETEND_VERSION=0.5.17 python -m pip install -e ./python
-python -m pip install pytest pybind11 msgpack cmake ninja
+python -m pip install pytest pybind11 msgpack cmake ninja datasets
 python scripts/specstream/check_environment.py
 ```
 
-The package metadata specifies runtime dependencies. For an offline machine,
-prepare a compatible wheel directory in advance and use pip's `--no-index` and
-`--find-links` options for both installation commands. Install a PyTorch build
-compatible with the intended CUDA environment; avoid replacing an existing
-validated environment merely to run these commands.
+For offline installation, place compatible wheels in a local directory and add
+`--no-index --find-links /path/to/wheels` to the pip commands.
 
-Build the inter-process protocol extension with the active environment's Python:
+Build the communication and GPU resource-control extensions:
 
 ```bash
 bash python/sglang/srt/speculative/spectre/cpp_zmq/scripts/build_cpp_zmq.sh
-```
-
-The build script checks prerequisites and does not install system packages.
-For nonstandard native-library locations, set `ZMQ_INCLUDE_DIR` and
-`ZMQ_LIBRARY_DIR`. Use `PYTHON` to select a different interpreter if needed.
-
-Build the optional GPU resource-control extension when testing shared-GPU grants:
-
-```bash
-# 80 is the compute capability used by the reference A800; change for your GPU.
 make -C csrc/specstream_smctrl config CUDA_ARCH=80
 make -C csrc/specstream_smctrl build
 python scripts/specstream/check_environment.py --gpu
 ```
 
-Validate the mask backend on the deployment GPU before enabling it in a server:
+Set `CUDA_ARCH` to your GPU's compute capability. The communication extension
+uses the active Python environment; `PYTHON`, `ZMQ_INCLUDE_DIR`, and
+`ZMQ_LIBRARY_DIR` can select another interpreter or native-library location.
+
+## Small-scale inference tests
+
+These tests run a real Target/Draft pair and save generated answers, request
+counts, token counts, latency, and throughput. The public-data examples also
+report answer accuracy on the selected subset.
+
+### 1. Start the model pair
+
+In the first terminal, activate the environment and set the local model paths:
 
 ```bash
-make -C csrc/specstream_smctrl validate TPC_LOW=0 TPC_HIGH=4
+conda activate specstream
+export TARGET_MODEL=/path/to/Qwen3-32B
+export DRAFT_MODEL=/path/to/Qwen3-0.6B
+export GPU_IDS=0,1
+export DRAFT_TPCS=34
+bash scripts/specstream/serve_pair.sh
 ```
 
-If stream masking is unsupported by the driver, test the independent Draft
-process backend explicitly:
+The script validates the global TPC mask on each selected GPU, starts a private
+CUDA MPS session, and loads Target followed by Draft. When it prints
+`SPECSTREAM_SERVER_READY=http://127.0.0.1:30000`, run the tests from a second
+terminal. Press Ctrl-C in the first terminal to stop the pair and its MPS session.
+Server commands, profiles, and logs are saved under `outputs/server_*`.
+
+This example uses a fixed Draft quota of 34 TPCs on each A800. Runtime admission
+and verification-width selection remain active. Set `DRAFT_TPCS` to the quota
+chosen for your GPU and model pair. The global mask applies to the separate
+Draft processes.
+
+The launcher's defaults are a 16,384-token context, 65,536 Target KV tokens,
+131,072 Draft KV tokens, and a 32 GB host-history budget per Target worker.
+Override `CONTEXT_LENGTH`, `TARGET_KV_TOKENS`, `DRAFT_KV_TOKENS`, and
+`CPU_MEMORY_GB` as needed. `TARGET_MEM_FRACTION` and `DRAFT_MEM_FRACTION` set the
+per-process memory ceilings, with defaults of 0.55 and 0.80.
+`TARGET_PORT`, `DRAFT_PORT`, and `ZMQ_PORT` default to 30000, 30001, and 5557;
+use `--base-url` in the evaluation command when changing the Target port.
+
+### 2. Run a long-input workload
+
+In the second terminal, from the repository root:
 
 ```bash
-make -C csrc/specstream_smctrl validate-global TPC_LOW=0 TPC_HIGH=4
+conda activate specstream
+export TARGET_MODEL=/path/to/Qwen3-32B
+export TEST_ROOT=outputs/example_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$TEST_ROOT"
+
+python scripts/specstream/evaluate.py prepare \
+  --kind synthetic --tokenizer "$TARGET_MODEL" \
+  --samples 16 --input-tokens 12288 --output-tokens 128 \
+  --output "$TEST_ROOT/synthetic.json"
+
+python scripts/specstream/evaluate.py run \
+  --workload "$TEST_ROOT/synthetic.json" --concurrency 4 \
+  --output-dir "$TEST_ROOT/synthetic_run"
+cat "$TEST_ROOT/synthetic_run/summary.json"
 ```
 
-Use `--specstream-smctrl-mask-scope global` only after that validator passes.
-This backend affects the whole Draft process and must not be applied to a
-process that also executes Target kernels. A successful build alone does not
-establish mask compatibility. The example of four TPCs is a small validation
-case, not a tuned performance setting.
+This sends 16 requests with 12,288 input tokens each and generates exactly 128
+tokens per request at concurrency 4. One warmup request precedes measurement.
+A completed run reports `completed: 16`, `errors: 0`, and
+`output_tokens: 2048`, and creates `complete.marker`.
 
-## Minimal tests
+### 3. Test on GSM8K
 
-The default smoke test uses synthetic tensors and protocol fixtures. It does
-not download models or datasets, start a service, or run a performance matrix:
+The [GSM8K dataset](https://huggingface.co/datasets/openai/gsm8k) provides
+short mathematical word problems. This example selects 32 questions from the
+`main` configuration's test split with seed 1, allows up to 512 output tokens,
+and scores the final numerical answer.
 
 ```bash
-bash scripts/specstream/smoke_test.sh
+python scripts/specstream/evaluate.py prepare \
+  --kind gsm8k --tokenizer "$TARGET_MODEL" \
+  --samples 32 --seed 1 --output-tokens 512 \
+  --output "$TEST_ROOT/gsm8k.json"
+
+python scripts/specstream/evaluate.py run \
+  --workload "$TEST_ROOT/gsm8k.json" --concurrency 4 \
+  --output-dir "$TEST_ROOT/gsm8k_run"
+cat "$TEST_ROOT/gsm8k_run/summary.json"
 ```
 
-Expected result: pytest reports passing tests and the script prints
-`SPECSTREAM_SMOKE=PASS`. This checks online-softmax equivalence, resource-profile
-selection, grant decisions, and GPU-history budget accounting on CPU.
+Data preparation downloads the dataset on the machine running the command.
+For an offline server, add `--source /path/to/gsm8k_main_test.jsonl` to the
+preparation command. Each source row contains `question` and `answer`.
 
-To exercise CUDA streaming attention and the verifier with synthetic KV tensors:
+### 4. Test on LongBench v2
+
+[LongBench v2](https://huggingface.co/datasets/zai-org/LongBench-v2) provides
+long-document multiple-choice questions. This example selects 16 complete
+prompts between 8,192 and 15,360 tokens from its `train` split with seed 1.
+Selection uses the Target tokenizer and its chat template; documents outside
+the range are skipped. The model returns an answer letter for each question.
+
+```bash
+python scripts/specstream/evaluate.py prepare \
+  --kind longbench-v2 --tokenizer "$TARGET_MODEL" \
+  --samples 16 --seed 1 --min-input-tokens 8192 --max-input-tokens 15360 \
+  --output-tokens 128 --output "$TEST_ROOT/longbench.json"
+
+python scripts/specstream/evaluate.py run \
+  --workload "$TEST_ROOT/longbench.json" --concurrency 4 \
+  --output-dir "$TEST_ROOT/longbench_run"
+cat "$TEST_ROOT/longbench_run/summary.json"
+```
+
+For local data, add `--source /path/to/longbench_v2.jsonl`. The source uses the
+dataset's original fields: `_id`, `context`, `question`, `choice_A` through
+`choice_D`, and `answer`. Both public-data loaders also accept a JSON array,
+a Parquet file, or a directory created by `datasets.save_to_disk`.
+
+### 5. Read the outputs
+
+Each prepared workload records sample IDs, token IDs, references, seed, and
+vocabulary hash. Each run writes:
+
+| File | Contents |
+| --- | --- |
+| `config.json` | Run arguments, server model information, and workload hash |
+| `generations.jsonl` | Answers, references, scoring, token counts, latency, and request errors |
+| `summary.json` | Completed requests, errors, output tokens, throughput, mean latency, and subset accuracy |
+| `complete.marker` | Written after every measured request finishes successfully |
+
+Throughput is generated tokens divided by the measured batch wall time,
+including prefill and queueing. Request latency covers submission through the
+full response. Warmup is excluded from both measurements. Public-data runs
+stop at EOS or the output limit, so their generated token counts vary.
+Accuracy uses all selected questions as its denominator. GSM8K extracts the
+final number; LongBench v2 matches the returned choice letter. These examples
+use zero-shot prompts and disable optional thinking in the chat template.
+
+Reuse a prepared workload to compare configurations on identical inputs.
+For a new run, choose a fresh output directory. All generated files in these
+examples stay under the ignored `outputs/` directory.
+
+Component checks are also available:
 
 ```bash
 bash scripts/specstream/smoke_test.sh --gpu
-```
-
-The GPU mode fails before testing if CUDA or the required attention kernels are
-unavailable. It is a component correctness test, not an end-to-end throughput
-claim. For the full retained component suite:
-
-```bash
 PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}" \
   python -m pytest -q python/sglang/test/spectre_specstream
 ```
-
-The remaining utilities are generic: `scripts/specstream/analyze_grant_events.py`
-checks captured grant events, and `scripts/specstream/smctrl/` assembles resource
-profiles from user-supplied measurements. Neither contains measured results or
-automatically tunes a TPC quota. Generated files belong outside the source tree
-or in an ignored output directory.
