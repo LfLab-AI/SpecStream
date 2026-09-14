@@ -518,7 +518,7 @@ class ServerArgs:
     speculative_ngram_external_corpus_max_tokens: int = 10000000
     enable_multi_layer_eagle: bool = False
 
-    # Spectre speculative decoding
+    # backend speculative decoding
     spectre_role: Optional[Literal["target", "draft"]] = None
     spectre_max_batch_size: int = 32
     spectre_reject_interval: int = 500
@@ -537,7 +537,7 @@ class ServerArgs:
     spectre_draft_priority: bool = False
     spectre_max_draft_priority_steps: int = 0
 
-    # SpecStream-SPECTRE target-side KV streaming
+    # SpecStream-backend target-side KV streaming
     specstream_enabled: bool = False
     specstream_profile_only: bool = False
     specstream_full_restore_baseline: bool = False
@@ -1390,7 +1390,7 @@ class ServerArgs:
                     # standalonedraft model and cuda graphs
                     reserved_mem += 6 * 1024
                 elif self.speculative_algorithm != "NGRAM":
-                    # eagle draft models and cuda graphs
+                    # backend draft models and cuda graphs
                     reserved_mem += 4 * 1024
 
             self.mem_fraction_static = (
@@ -1974,8 +1974,8 @@ class ServerArgs:
             "Gemma3nForCausalLM",
             "Gemma3nForConditionalGeneration",
         ]:
-            # FIXME: https://github.com/sgl-project/sglang/pull/7367 is not compatible with gemma2 model.
-            # It failed at this test: https://github.com/sgl-project/sglang/actions/runs/16255155597/job/45890331952#step:4:736
+            # FIXME: [external reference omitted] is not compatible with gemma2 model.
+            # It failed at this test: [external reference omitted]
             logger.warning(
                 f"Disable hybrid SWA memory for {model_arch} as it is not yet supported."
             )
@@ -1990,13 +1990,13 @@ class ServerArgs:
                     f"Disabling hybrid SWA memory for {model_arch} as it is not yet supported."
                 )
                 self.disable_hybrid_swa_memory = True
-                # https://docs.sglang.ai/advanced_features/attention_backend.html
+                # [external reference omitted]
                 accepted_backends = ["fa3", "triton", "trtllm_mha"]
                 assert (
                     self.attention_backend in accepted_backends
                 ), f"One of the attention backends in {accepted_backends} is required for {model_arch}, but got {self.attention_backend}"
         elif model_arch in ["Olmo2ForCausalLM"]:
-            # FIXME: https://github.com/sgl-project/sglang/pull/7367 is not compatible with Olmo3 model.
+            # FIXME: [external reference omitted] is not compatible with Olmo3 model.
             logger.warning(
                 f"Disabling hybrid SWA memory for {model_arch} as it is not yet supported."
             )
@@ -2189,8 +2189,8 @@ class ServerArgs:
 
         # TRTLLM AllReduce Fusion supports SM90/100, enable it by default
         # for models with explicit support (DeepseekV3, GptOss, Glm4Moe, Qwen3Moe)
-        # TODO: currently, it is only supported in the single node scenario. https://github.com/flashinfer-ai/flashinfer/issues/2006
-        # TODO: there is currently a bug on H20 device specifically, https://github.com/flashinfer-ai/flashinfer/issues/2204
+        # TODO: currently, it is only supported in the single node scenario. [external reference omitted]
+        # TODO: there is currently a bug on H20 device specifically, [external reference omitted]
         device_name = get_device_name()
         is_h20_device = (
             device_name and "H20" in device_name and "H200" not in device_name
@@ -2259,7 +2259,7 @@ class ServerArgs:
             ), f"mamba extra_buffer is not supported for {model_arch} model"
 
         # FlashInfer GDN decode is incompatible with no_buffer scheduling.
-        # See https://github.com/sgl-project/sglang/issues/20791
+        # See [external reference omitted]
         if (
             self.linear_attn_decode_backend == "flashinfer"
             and self.mamba_scheduler_strategy == "no_buffer"
@@ -2268,7 +2268,7 @@ class ServerArgs:
                 "FlashInfer GDN decode (--linear-attn-decode-backend flashinfer) is not "
                 "compatible with --mamba-scheduler-strategy no_buffer. "
                 "Please use --mamba-scheduler-strategy extra_buffer instead. "
-                "See https://github.com/sgl-project/sglang/issues/20791"
+                "See [dependency documentation]"
             )
 
         if self.enable_mamba_extra_buffer():  # extra_buffer
@@ -2348,7 +2348,7 @@ class ServerArgs:
             if is_hopper_with_cuda_12_3() and is_no_spec_infer_or_topk_one(self):
                 # Note: flashinfer 0.6.1 caused performance regression on Hopper attention kernel
                 # Before the kernel is fixed, we choose fa3 as the default backend on Hopper MHA
-                # ref: https://github.com/sgl-project/sglang/issues/17411
+                # ref: [external reference omitted]
                 return "fa3"
             elif (
                 is_sm100_supported()
@@ -3092,8 +3092,8 @@ class ServerArgs:
         if self.speculative_algorithm == "NEXTN":
             self.speculative_algorithm = "EAGLE"
 
-        # SPECTRE is a pair of independent SGLang services rather than an
-        # in-process EAGLE draft worker, so it does not enter the EAGLE default
+        # backend is a pair of independent SGLang services rather than an
+        # in-process backend draft worker, so it does not enter the backend default
         # selection block below.  Nevertheless CUDA-graph setup and the Target
         # scheduler both require concrete values.  Normalize them for *both*
         # roles before either model runner is initialized.
@@ -3133,7 +3133,7 @@ class ServerArgs:
                 # is guaranteed to be connected.  In fail-fast calibration
                 # mode that ordinary request would otherwise terminate Target
                 # startup after the initial receive timeout.  The documented
-                # workflow performs an explicit SPECTRE smoke request after
+                # workflow performs an explicit backend smoke request after
                 # both processes are ready.
                 self.skip_server_warmup = True
                 logger.warning(
@@ -5165,14 +5165,14 @@ class ServerArgs:
             help="Fail startup if the tokenized external ngram corpus exceeds this many tokens. Tune this based on your CPU memory budget.",
         )
 
-        # Multi-layer Eagle speculative decoding
+        # Multi-layer backend speculative decoding
         parser.add_argument(
             "--enable-multi-layer-eagle",
             action="store_true",
             help="Enable multi-layer Eagle speculative decoding.",
         )
 
-        # Spectre speculative decoding
+        # backend speculative decoding
         parser.add_argument(
             "--spectre-role",
             type=str,

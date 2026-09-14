@@ -57,14 +57,7 @@ def murmur_hash32_kernel(
     num_cols,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """
-    MurmurHash 32-bit implementation for Triton.
-    Reference:
-    - https://medium.com/@thealonemusk/murmurhash-the-scrappy-algorithm-that-secretly-powers-half-the-internet-2d3f79b4509b
-    - https://en.wikipedia.org/wiki/MurmurHash
-
-    We treat 64-bit seed, 32-bit position, and 32-bit col_index as 4 4-byte blocks, and bit-blend them together.
-    """
+    '\n    MurmurHash 32-bit implementation for Triton.\n    Reference:\n    - [external reference omitted]\n    - [external reference omitted]\n\n    We treat 64-bit seed, 32-bit position, and 32-bit col_index as 4 4-byte blocks, and bit-blend them together.\n    '
     pid_row = tl.program_id(0)
     pid_col = tl.program_id(1)
 

@@ -6,7 +6,7 @@ The flashinfer_mla_disable_ragged flag controls whether to use ragged prefill wr
 When it's set to false, all wrappers are BatchMLAPaged wrapper.
 When it's set to true, the backend uses BatchRagged and BatchMLAPaged wrapper for prefilling,
 and uses BatchMLAPaged wrapper for decoding.
-More details can be found in https://docs.flashinfer.ai/api/mla.html
+More details can be found in [dependency documentation]
 """
 
 from dataclasses import dataclass

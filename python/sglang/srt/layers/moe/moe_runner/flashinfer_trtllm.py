@@ -489,7 +489,7 @@ def fused_experts_none_to_flashinfer_trtllm_fp8(
                 tune_max_num_tokens=next_power_of_2(a_q.shape[0]),
                 fp8_quantization_type=int(fp8_quantization_type),
             )
-        # TODO: Once https://github.com/flashinfer-ai/flashinfer/issues/2703 is fixed, pass output to moe kernel and remove this copy.
+        # TODO: Once [external reference omitted] is fixed, pass output to moe kernel and remove this copy.
         symm_output.copy_(output)
         output = symm_output
     else:

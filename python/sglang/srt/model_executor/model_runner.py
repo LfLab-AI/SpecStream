@@ -1143,7 +1143,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 t.start()
 
         # Load the model
-        # Remove monkey_patch when linear.py quant remove dependencies with vllm
+        # Remove monkey_patch when linear.py quant remove dependencies with backend
         monkey_patch_vllm_parallel_state()
 
         enable_cpu_backup = self.server_args.enable_weights_cpu_backup or (
@@ -2088,7 +2088,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         if backend_str not in [
             "flashinfer_trtllm",
-            # TODO: Enable for flashinfer_trtllm_routed once https://github.com/flashinfer-ai/flashinfer/issues/2749 is fixed.
+            # TODO: Enable for flashinfer_trtllm_routed once [external reference omitted] is fixed.
             # "flashinfer_trtllm_routed",
             "flashinfer_mxfp4",
             # TODO: flashinfer_cutlass will cause some flashinfer compilation errors. To be fixed.
@@ -2506,7 +2506,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.model.model = resolve_language_model(self.model)
         language_model = getattr(self.model, "language_model", self.model)
 
-        # Some draft models (e.g. eagle3) don't have a standard 'layers' attribute
+        # Some draft models (e.g. backend) don't have a standard 'layers' attribute
         if not hasattr(language_model.model, "layers"):
             logger.warning(
                 "Disable piecewise CUDA graph because the model does not have a 'layers' attribute"

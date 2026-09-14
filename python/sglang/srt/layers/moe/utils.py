@@ -329,7 +329,7 @@ def speculative_moe_a2a_backend_context():
 
 
 # The type of method in top-K routing, for use in torch custom op
-# Please keep this in sync with the counterpart defined in https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/trtllm/fused_moe/runner.h
+# Please keep this in sync with the counterpart defined in [external reference omitted]
 class RoutingMethodType(IntEnum):
     # Default: Softmax -> TopK
     Default = (0,)

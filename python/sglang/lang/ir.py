@@ -183,7 +183,7 @@ class SglFunction:
     ):
         from sglang.lang.interpreter import run_program
 
-        # avoid using [] as the default arg: https://nikos7am.com/posts/mutable-default-arguments/
+        # avoid using [] as the default arg: [external reference omitted]
         if stop is None:
             stop = []
         if stop_token_ids is None:

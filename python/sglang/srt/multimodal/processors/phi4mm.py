@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 # It is an adapter of hf phi4 mm processor to make it work for sglang
-# Ref: https://huggingface.co/microsoft/Phi-4-multimodal-instruct/blob/main/processing_phi4mm.py#L693
+# Ref: [external reference omitted]
 class Phi4MMProcessorAdapter(ProcessorMixin):
     def __init__(self, _processor) -> None:
         self._processor = _processor
@@ -52,7 +52,7 @@ class Phi4MMMultimodalProcessor(BaseMultimodalProcessor):
         super().__init__(hf_config, server_args, self.processor, *args, **kwargs)
 
         # the following CONSTANTS come from hugging-face microsoft/Phi-4-multimodal-instruct's processing_phi4mm.py file
-        # ref: https://huggingface.co/microsoft/Phi-4-multimodal-instruct/blob/main/processing_phi4mm.py
+        # ref: [external reference omitted]
         self.IMAGE_TOKEN = "<|endoftext10|>"
         self.AUDIO_TOKEN = "<|endoftext11|>"
         self.IM_TOKEN_ID = 200010
@@ -84,7 +84,7 @@ class Phi4MMMultimodalProcessor(BaseMultimodalProcessor):
 
         if base_output.audios is not None:
             # hugging-face microsoft/Phi-4-multimodal-instruct's processing_phi4mm.py file requires the audio input to be tuple of (audio, sample_rate)
-            # ref: https://huggingface.co/microsoft/Phi-4-multimodal-instruct/blob/main/processing_phi4mm.py
+            # ref: [external reference omitted]
             base_output.audios = [
                 (audio, self.AUDIO_SAMPLE_RATE) for audio in base_output.audios
             ]

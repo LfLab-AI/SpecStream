@@ -68,10 +68,7 @@ if _is_npu:
 
 
 class DeepEPMoE(FusedMoE):
-    """
-    MoE Expert Parallel Impl based on DeepEP (https://github.com/deepseek-ai/DeepEP/tree/main)
-    Mooncake EP shares the same class, as they expose the same interface.
-    """
+    '\n    MoE Expert Parallel Impl based on DeepEP ([external reference omitted])\n    Mooncake EP shares the same class, as they expose the same interface.\n    '
 
     _has_printed = False
 

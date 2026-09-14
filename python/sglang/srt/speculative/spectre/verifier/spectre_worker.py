@@ -182,7 +182,7 @@ class SpectreWorker:
                     self.specstream_runtime.after_normal_decode(batch, batch_result)
                 return batch_result
 
-            # Ordinary SPECTRE waits for this round's draft before verification;
+            # Ordinary backend waits for this round's draft before verification;
             # parallel mode keeps the original overlap and receives after Target.
             if getattr(batch, "specstream_mode", "parallel") == "ordinary":
                 recv_draft_fn = getattr(batch, "recv_draft_fn", None)
@@ -466,7 +466,7 @@ class SpectreWorker:
         # The Target forward is asynchronous.  Receive the next-round remote
         # draft while its GPU work is executing, then wait only for this
         # forward's completion event before CPU/GPU result consumption.  A
-        # device-wide synchronize here destroyed SPECTRE's Draft-Verify overlap
+        # device-wide synchronize here destroyed backend's Draft-Verify overlap
         # and also waited for unrelated D2H/H2D streams.
         new_drafts_per_req: dict = {}
         if recv_draft_fn is not None and not batch.forward_mode.is_idle():

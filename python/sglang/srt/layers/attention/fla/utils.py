@@ -1,4 +1,4 @@
-# Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/utils.py
+# Adapt from [external reference omitted]
 # -*- coding: utf-8 -*-
 
 import contextlib

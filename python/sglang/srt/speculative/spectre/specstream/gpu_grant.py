@@ -7,12 +7,7 @@ from typing import Iterable
 
 @dataclass(frozen=True)
 class DraftExecutionGrant:
-    """One revocable Draft execution quantum.
-
-    ``desired_q`` remains part of the SPECTRE request.  This object only grants
-    permission to execute CUDA work and therefore intentionally carries no
-    speculative-horizon semantics.
-    """
+    'One revocable Draft execution quantum.\n\n    ``desired_q`` remains part of the backend request.  This object only grants\n    permission to execute CUDA work and therefore intentionally carries no\n    speculative-horizon semantics.\n    '
 
     request_id: str
     spec_cnt: int

@@ -8,20 +8,7 @@ if TYPE_CHECKING:
 
 
 class BaseSparseAlgorithm(ABC):
-    """
-    Abstract base class for sparse attention algorithms.
-
-    This class provides a unified interface for implementing various retrievable KVCache
-    compression algorithms. Token-wise sparsity is treated as page-wise with page_size=1.
-
-    References:
-        - ChunkKV: https://arxiv.org/abs/2502.00299
-        - Quest: https://arxiv.org/pdf/2406.10774
-        - PQCache: https://arxiv.org/abs/2407.12820
-        - SnapKV: https://arxiv.org/pdf/2404.14469
-        - Look-ahead QCache: https://arxiv.org/pdf/2505.20334
-        - and more...
-    """
+    '\n    Abstract base class for sparse attention algorithms.\n\n    This class provides a unified interface for implementing various retrievable KVCache\n    compression algorithms. Token-wise sparsity is treated as page-wise with page_size=1.\n\n    References:\n        - ChunkKV: [external reference omitted]\n        - Quest: [external reference omitted]\n        - PQCache: [external reference omitted]\n        - SnapKV: [external reference omitted]\n        - Look-ahead QCache: [external reference omitted]\n        - and more...\n    '
 
     def __init__(self, config, device: torch.device, **kwargs):
         self.config = config

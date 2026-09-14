@@ -146,36 +146,7 @@ def can_actually_p2p(
     batch_src: Sequence[int],
     batch_tgt: Sequence[int],
 ) -> Sequence[bool]:
-    """
-    Usually, checking if P2P access is enabled can be done by
-    `torch.cuda.can_device_access_peer(src, tgt)`. However, sometimes
-    the driver might be broken, and `torch.cuda.can_device_access_peer(src, tgt)`
-    returns `True` even if P2P access is not actually possible.
-    See https://github.com/vllm-project/vllm/issues/2728 and
-    https://forums.developer.nvidia.com/t/direct-gpu-gpu-communication-does-not-seem-to-work-properly/283264/10
-    Therefore, we have to perform a real P2P access to check if it is actually
-    possible.
-
-    Note on p2p and cuda IPC:
-    Usually, one process uses one GPU:
-    GPU src --> cuda context src --> tensor src --> process src
-
-    We need to combine p2p and cuda IPC, so that:
-    GPU src --> cuda context src --> tensor src --> process src
-                                      |shared|
-    GPU tgt --> cuda context tgt --> tensor tgt --> process tgt
-    That is to say, process src creates a tensor in GPU src, passes IPC handle to
-    process tgt, and process tgt accesses the tensor in GPU tgt. Any operation on the
-    tensor in process tgt will be reflected in the tensor in process src, because
-    they are the same memory segment.
-    It is important to note that process tgt accesses the tensor in GPU tgt, not
-    GPU src. That's why we need p2p access.
-
-    The most time-consuming part is the process creation. To avoid creating
-    processes for every pair of GPUs, we use batched testing. We create two
-    processes for testing all pairs of GPUs in batch. The trick is to reset
-    the device after each test (which is not available in PyTorch).
-    """  # noqa
+    "\n    Usually, checking if P2P access is enabled can be done by\n    `torch.cuda.can_device_access_peer(src, tgt)`. However, sometimes\n    the driver might be broken, and `torch.cuda.can_device_access_peer(src, tgt)`\n    returns `True` even if P2P access is not actually possible.\n    See [external reference omitted] and\n    [external reference omitted]\n    Therefore, we have to perform a real P2P access to check if it is actually\n    possible.\n\n    Note on p2p and cuda IPC:\n    Usually, one process uses one GPU:\n    GPU src --> cuda context src --> tensor src --> process src\n\n    We need to combine p2p and cuda IPC, so that:\n    GPU src --> cuda context src --> tensor src --> process src\n                                      |shared|\n    GPU tgt --> cuda context tgt --> tensor tgt --> process tgt\n    That is to say, process src creates a tensor in GPU src, passes IPC handle to\n    process tgt, and process tgt accesses the tensor in GPU tgt. Any operation on the\n    tensor in process tgt will be reflected in the tensor in process src, because\n    they are the same memory segment.\n    It is important to note that process tgt accesses the tensor in GPU tgt, not\n    GPU src. That's why we need p2p access.\n\n    The most time-consuming part is the process creation. To avoid creating\n    processes for every pair of GPUs, we use batched testing. We create two\n    processes for testing all pairs of GPUs in batch. The trick is to reset\n    the device after each test (which is not available in PyTorch).\n    "  # noqa
     cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
     # pass the CUDA_VISIBLE_DEVICES to the child process
     # to make sure they see the same set of GPUs
@@ -236,9 +207,9 @@ def can_actually_p2p(
 # then all the processes can read the cache file to check the p2p access status.
 # Note that the cache file is suffixed by the CUDA_VISIBLE_DEVICES, so that we
 #  can have different cache files for different CUDA_VISIBLE_DEVICES settings,
-#  e.g. used by different vllm engines. The device id in the cache file is a
+#  e.g. used by different backend engines. The device id in the cache file is a
 #  **local** device id, i.e. from 0 to num_dev-1, where num_dev is the number
-#  of visible devices in the vllm engine.
+#  of visible devices in the backend engine.
 _gpu_p2p_access_cache: Optional[Dict[str, bool]] = None
 
 
@@ -259,7 +230,7 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         cuda_visible_devices = ",".join(str(i) for i in range(num_dev))
 
     # VLLM_CACHE_ROOT -> SGLANG_CACHE_ROOT
-    # "~/.cache/vllm" -> "~/.cache/sglang"
+    # "~/.cache/backend" -> "~/.cache/sglang"
     SGLANG_CACHE_ROOT = os.path.expanduser("~/.cache/sglang")
     path = os.path.join(
         SGLANG_CACHE_ROOT, f"gpu_p2p_access_cache_for_{cuda_visible_devices}.json"

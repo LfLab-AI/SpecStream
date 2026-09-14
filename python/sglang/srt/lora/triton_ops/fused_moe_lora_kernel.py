@@ -17,12 +17,7 @@ _LORA_PTR_DICT: dict[tuple[int, ...], torch.Tensor] = {}
 
 
 def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
-    """
-    `_LORA_PTR_DICT` collects the required information during `profile_run`,
-    After this, it remains constant and subsequent usage is through LUT.
-    Refer to:
-    https://github.com/triton-lang/triton/blob/release/3.1.x/python/tutorials/08-grouped-gemm.py
-    """
+    '\n    `_LORA_PTR_DICT` collects the required information during `profile_run`,\n    After this, it remains constant and subsequent usage is through LUT.\n    Refer to:\n    [external reference omitted]\n    '
     key = tuple(lora_weight.data_ptr() for lora_weight in lora_weights)
 
     if (ptr_tensor := _LORA_PTR_DICT.get(key)) is not None:

@@ -12,21 +12,8 @@
 # limitations under the License.
 # ==============================================================================
 
-# Source: https://github.com/LLaVA-VL/LLaVA-NeXT/blob/main/llava/mm_utils.py
-"""
-Utilities for multi-modal models.
-
-This python file mainly contains utilities that were used in the
-image processing logic of llava-next including operations such as
-anyres and anyres_max
-
-Currently supports the anyres and anyres_max operation for CLIP and
-SigLip. For more information, you may refer to the paper or the blog
-
-LLaVA-NeXT : https://llava-vl.github.io/blog/2024-01-30-llava-next/
-LLaVA-Onevision : https://arxiv.org/pdf/2408.03326
-
-"""
+# Source: [external reference omitted]
+'\nUtilities for multi-modal models.\n\nThis python file mainly contains utilities that were used in the\nimage processing logic of llava-next including operations such as\nanyres and anyres_max\n\nCurrently supports the anyres and anyres_max operation for CLIP and\nSigLip. For more information, you may refer to the paper or the blog\n\nLLaVA-NeXT : [external reference omitted]\nLLaVA-Onevision : [external reference omitted]\n\n'
 
 import ast
 import itertools

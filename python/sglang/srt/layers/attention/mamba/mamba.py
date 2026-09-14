@@ -138,7 +138,7 @@ def mamba_v2_sharded_weight_loader(
             # - always shard on dim 0
             # - the ignore is for a mundane mypy error as it does not
             #   seem to handle slices well.
-            # https://github.com/python/mypy/issues/2410
+            # [external reference omitted]
             param.data[
                 boundary : (boundary + take), ...  # type: ignore[misc]
             ] = loaded_weight[

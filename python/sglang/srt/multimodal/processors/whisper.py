@@ -13,7 +13,7 @@ from sglang.srt.utils import load_audio
 logger = logging.getLogger(__name__)
 
 # ISO 639-1 supported languages for Whisper
-# From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
+# From [external reference omitted]
 # Maps ISO 639-1 code -> Full language name
 ISO639_1_SUPPORTED_LANGS = {
     "af": "Afrikaans",

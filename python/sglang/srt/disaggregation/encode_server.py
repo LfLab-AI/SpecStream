@@ -352,7 +352,7 @@ class MMEncoder:
                 if "padding" not in self.vision_config["audio"]:
                     if self.model_type == "qwen2_audio":
                         # For Qwen2Audio, use padding="max_length"
-                        # (same as https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_audio/processing_qwen2_audio.py#L93)
+                        # (same as [external reference omitted])
                         self.vision_config["audio"]["padding"] = "max_length"
                     else:
                         self.vision_config["audio"]["padding"] = True
@@ -833,7 +833,7 @@ class MMEncoder:
 
     def _calculate_timestamps(self, indices, video_fps: float, merge_size: int = 2):
         """Calculate timestamps for video frames, used for qwen3_vl models."""
-        # refer to https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_vl/processing_qwen3_vl.py#L255
+        # refer to [external reference omitted]
         if not isinstance(indices, list):
             indices = indices.tolist()
         if len(indices) % merge_size != 0:

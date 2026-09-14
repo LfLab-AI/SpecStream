@@ -14,7 +14,7 @@
 
 # Modeling from:
 # ./llama.py and
-# https://github.com/huggingface/transformers/blob/main/src/transformers/models/glmasr/modular_glmasr.py
+# [external reference omitted]
 """Inference-only GLM-ASR-HF model compatible with HuggingFace weights."""
 
 import logging

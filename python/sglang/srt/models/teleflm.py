@@ -35,15 +35,7 @@ from sglang.srt.models.llama import LlamaForCausalLM, LlamaModel
 
 
 class TeleFLMModel(LlamaModel):
-    """
-    This implementation is based on the µScaling paper presented at
-    the ICLR 2025 Workshop:
-    NanoLM: An Affordable LLM Study Benchmark \
-    via Accurate Loss Prediction across Scales
-    by Yiqun Yao et al.
-    Available at: https://openreview.net/forum?id=IwaPYg1SCA
-    arXiv preprint: https://arxiv.org/abs/2304.06875
-    """
+    '\n    This implementation is based on the µScaling paper presented at\n    the ICLR 2025 Workshop:\n    NanoLM: An Affordable LLM Study Benchmark     via Accurate Loss Prediction across Scales\n    by Yiqun Yao et al.\n    Available at: [external reference omitted]\n    arXiv preprint: [external reference omitted]\n    '
 
     def __init__(
         self,

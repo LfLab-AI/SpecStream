@@ -279,7 +279,7 @@ class IOAwareController:
         # fill.  Letting the generic cost model select ``parallel`` here adds
         # ZMQ/MPS scheduling overhead and can make the Drafter contend with the
         # Target despite there being no offload benefit.  Keep dynamic-q, but
-        # restrict this round to SPECTRE ordinary (serial) execution.
+        # restrict this round to backend ordinary (serial) execution.
         if batch_state.history_tokens <= 0:
             force_ordinary = True
             coexec_mode = SERIALIZE

@@ -270,7 +270,7 @@ def get_local_ip_by_nic(interface: str = None) -> Optional[str]:
 def get_local_ip_by_remote() -> Optional[str]:
     # Google's public DNS servers, used to discover the local IP.
     # UDP connect doesn't send packets; it just selects the right source address.
-    # https://developers.google.com/speed/public-dns/docs/using#addresses
+    # [external reference omitted]
     # Try IPv4 first, then IPv6. getaddrinfo on a literal IP returns exactly
     # one result, so we unpack directly instead of looping.
     for dns_host, dns_port in [("8.8.8.8", 80), ("2001:4860:4860::8888", 80)]:
@@ -431,7 +431,7 @@ class NetworkAddress:
         return socket.AF_INET6 if self.is_ipv6 else socket.AF_INET
 
     def to_url(self, scheme: str = "http") -> str:
-        """``http://127.0.0.1:30000`` or ``http://[::1]:30000``."""
+        '``[external reference omitted] or ``[external reference omitted]]:30000``.'
         return f"{scheme}://{_wrap(self.host)}:{self.port}"
 
     def to_tcp(self) -> str:

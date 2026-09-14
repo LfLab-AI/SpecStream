@@ -235,7 +235,7 @@ class MooncakeBaseStore:
         except ImportError as e:
             raise ImportError(
                 "Please install mooncake by following the instructions at "
-                "https://kvcache-ai.github.io/Mooncake/getting_started/build.html "
+                "[dependency documentation] "
                 "to run SGLang with MooncakeConnector."
             ) from e
 
@@ -537,13 +537,7 @@ class MooncakeStore(HiCacheStorage, MooncakeBaseStore):
                 return self._get_mha_buffer_meta(keys, host_indices)
 
     def _batch_postprocess(self, results: List[int], is_set_operate=False):
-        """
-        refer to https://github.com/kvcache-ai/Mooncake/blob/main/mooncake-store/include/pybind_client.h
-        for batch_get_into, results is Vector of integers,
-            where each element is the number of bytes read on success, or a negative value on error
-        for batch_put_from, results is Vector of integers,
-            where each element is 0 on success, or a negative value on error
-        """
+        '\n        refer to [external reference omitted]\n        for batch_get_into, results is Vector of integers,\n            where each element is the number of bytes read on success, or a negative value on error\n        for batch_put_from, results is Vector of integers,\n            where each element is 0 on success, or a negative value on error\n        '
         if self.is_mla_backend:
             return [k_res == 0 if is_set_operate else k_res > 0 for k_res in results]
         else:

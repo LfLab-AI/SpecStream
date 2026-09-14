@@ -168,7 +168,7 @@ class NixlKVManager(CommonKVManager):
         except ImportError as e:
             raise ImportError(
                 "Please install NIXL by following the instructions at "
-                "https://github.com/ai-dynamo/nixl/blob/main/README.md "
+                "[dependency documentation] "
                 "to run SGLang with NixlTransferEngine."
             ) from e
 

@@ -600,10 +600,7 @@ def apply_awq_marlin_linear(
 
 
 class MarlinConfig(QuantizationConfig):
-    """Config class for Marlin.
-
-    Reference: https://github.com/IST-DASLab/marlin/tree/master
-    """
+    'Config class for Marlin.\n\n    Reference: [external reference omitted]\n    '
 
     def __init__(
         self,

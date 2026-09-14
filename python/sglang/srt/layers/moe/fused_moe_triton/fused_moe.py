@@ -72,7 +72,7 @@ if not _is_cuda and not _is_hip and not _is_xpu:
 
         _has_vllm_ops = True
     except ImportError:
-        # Fallback: vllm not available, will use native PyTorch implementations
+        # Fallback: backend not available, will use native PyTorch implementations
         _has_vllm_ops = False
 
 padding_size = 128 if bool(int(os.getenv("SGLANG_MOE_PADDING", "0"))) else 0
@@ -370,7 +370,7 @@ def fused_experts_impl(
     num_tokens, _ = hidden_states.shape
     E, N, _ = w1.shape
     # We execute the fused_moe kernel in chunks to circumvent this issue:
-    # https://github.com/vllm-project/vllm/issues/5938
+    # [external reference omitted]
     CHUNK_SIZE = 64 * 1024
     M = min(num_tokens, CHUNK_SIZE)
     config_dtype = get_config_dtype_str(
@@ -690,7 +690,7 @@ def fused_experts_impl(
                     out_hidden_states[begin_chunk_idx:end_chunk_idx],
                 )
             else:
-                # Fallback: use triton moe_sum_reduce when vllm is not available
+                # Fallback: use triton moe_sum_reduce when backend is not available
                 moe_sum_reduce_triton(
                     intermediate_cache3.view(*intermediate_cache3.shape),
                     out_hidden_states[begin_chunk_idx:end_chunk_idx],

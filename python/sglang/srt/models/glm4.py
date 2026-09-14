@@ -14,7 +14,7 @@
 
 # Modeling from:
 # ./llama.py and
-# https://github.com/huggingface/transformers/blob/main/src/transformers/models/glm4/modular_glm4.py
+# [external reference omitted]
 """Inference-only GLM-4-0414 model compatible with HuggingFace weights."""
 
 import logging
@@ -336,7 +336,7 @@ class Glm4Model(nn.Module):
         else:
             self.norm = PPMissingLayer(return_tuple=True)
 
-        # For EAGLE3 support
+        # For backend support
         self.layers_to_capture = []
 
     def get_input_embeddings(self) -> nn.Embedding:
@@ -463,7 +463,7 @@ class Glm4ForCausalLM(nn.Module):
 
         self.logits_processor = LogitsProcessor(config)
         self.pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
-        # For EAGLE3 support
+        # For backend support
         self.capture_aux_hidden_states = False
 
     def get_input_embedding(self, input_ids: torch.Tensor) -> torch.Tensor:

@@ -605,5 +605,5 @@ class Qwen3OmniMoeConfig(PretrainedConfig):
         """
         # Overridden for deeply nested config like Qwen2-Omni. We don't have any omni model
         # except for Qwen yet. This has to be generalized if more deeply nested configs are
-        # added. NOTE: currently method used only by vLLM
+        # added. NOTE: currently method used only by backend
         return self.thinker_config.get_text_config()

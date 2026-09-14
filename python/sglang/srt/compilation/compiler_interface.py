@@ -18,9 +18,7 @@ from sglang.srt.utils.common import torch_release
 
 
 class CompilerInterface:
-    """
-    The interface for a compiler that can be used by vLLM.
-    """
+    '\n    The interface for a compiler that can be used by backend.\n    '
 
     # The name of the compiler, e.g. inductor.
     # This is a class-level attribute.
@@ -29,31 +27,11 @@ class CompilerInterface:
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
     ):
-        """
-        when the vLLM process uses `cache_dir` as the cache directory,
-        the compiler should initialize itself with the cache directory,
-        e.g. by re-directing its own cache directory to a sub-directory.
-
-        prefix can be used in combination with cache_dir to figure out the base
-        cache directory, e.g. there're multiple parts of model being compiled,
-        but we want to share the same cache directory for all of them.
-
-        e.g.
-        cache_dir = "/path/to/dir/backbone", prefix = "backbone"
-        cache_dir = "/path/to/dir/eagle_head", prefix = "eagle_head"
-        """
+        '\n        when the backend process uses `cache_dir` as the cache directory,\n        the compiler should initialize itself with the cache directory,\n        e.g. by re-directing its own cache directory to a sub-directory.\n\n        prefix can be used in combination with cache_dir to figure out the base\n        cache directory, e.g. there\'re multiple parts of model being compiled,\n        but we want to share the same cache directory for all of them.\n\n        e.g.\n        cache_dir = "/path/to/dir/backbone", prefix = "backbone"\n        cache_dir = "/path/to/dir/eagle_head", prefix = "eagle_head"\n        '
         pass
 
     def compute_hash(self) -> str:
-        """
-        Gather all the relevant information from the vLLM config,
-        to compute a hash so that we can cache the compiled model.
-
-        See [`VllmConfig.compute_hash`][vllm.config.VllmConfig.compute_hash]
-        to check what information
-        is already considered by default. This function should only
-        consider the information that is specific to the compiler.
-        """
+        '\n        Gather all the relevant information from the backend config,\n        to compute a hash so that we can cache the compiled model.\n\n        See [`VllmConfig.compute_hash`][backend.config.VllmConfig.compute_hash]\n        to check what information\n        is already considered by default. This function should only\n        consider the information that is specific to the compiler.\n        '
         return ""
 
     def compile(
@@ -216,7 +194,7 @@ class InductorAdaptor(CompilerInterface):
         set_inductor_config(current_config, runtime_shape)
 
         # inductor can inplace modify the graph, so we need to copy it
-        # see https://github.com/pytorch/pytorch/issues/138980
+        # see [external reference omitted]
         graph = copy.deepcopy(graph)
 
         # it's the first time we compile this graph
@@ -291,8 +269,8 @@ class InductorAdaptor(CompilerInterface):
             # Inductor refuses to cache the graph outside of Dynamo
             # tracing context, and also disables caching for graphs
             # with high-order ops.
-            # For vLLM, in either case, we want to cache the graph.
-            # see https://github.com/pytorch/pytorch/blob/9f5ebf3fc609105a74eab4ccc24932d6353ff566/torch/_inductor/codecache.py#L1221 # noqa
+            # For backend, in either case, we want to cache the graph.
+            # see [external reference omitted] # noqa
             return
 
         def _get_shape_env() -> AlwaysHitShapeEnv:
@@ -343,7 +321,7 @@ class InductorAdaptor(CompilerInterface):
 
             # Disable remote caching. When these are on, on remote cache-hit,
             # the monkey-patched functions never actually get called.
-            # vLLM today assumes and requires the monkey-patched functions to
+            # backend today assumes and requires the monkey-patched functions to
             # get hit.
             # TODO(zou3519): we're going to replace this all with
             # standalone_compile sometime.

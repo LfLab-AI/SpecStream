@@ -278,26 +278,7 @@ class MoonVisionPatchEmbed(nn.Module):
 
 
 class Rope2DPosEmb(nn.Module):
-    """2D rotary position embedding with multi-resolution support.
-
-    This class is intended to be used in the following way:
-    1. Before training, create an instance of Rope2DPosEmb. This instance will hold the precomputed cis.
-    2. Before each forward pass, call `get_freqs_cis_by_*` to get the `freqs_cis` tensor for this iteration.
-    3. During the forward pass, pass the `freqs_cis` tensor to each attention layer, and call `apply` just before each attention operation.
-        The rope is shared across all attention layers and all heads.
-
-    Refs:
-    - RoFormer: https://arxiv.org/abs/2104.09864
-    - VisionLLaMA: https://arxiv.org/abs/2403.00522
-    - https://github.com/Meituan-AutoML/VisionLLaMA/blob/main/dit/models.py
-
-    Args:
-        dim (int): usually the multi-head attention dimension, should be divisible by 4 (TODO: relax this constraint if needed)
-        max_height (int): the maximum height of the 2D grid
-        max_width (int): the maximum width of the 2D grid
-        theta_base (float): the base of the theta
-        device (str): the device to store the precomputed cis
-    """
+    '2D rotary position embedding with multi-resolution support.\n\n    This class is intended to be used in the following way:\n    1. Before training, create an instance of Rope2DPosEmb. This instance will hold the precomputed cis.\n    2. Before each forward pass, call `get_freqs_cis_by_*` to get the `freqs_cis` tensor for this iteration.\n    3. During the forward pass, pass the `freqs_cis` tensor to each attention layer, and call `apply` just before each attention operation.\n        The rope is shared across all attention layers and all heads.\n\n    Refs:\n    - RoFormer: [external reference omitted]\n    - VisionLLaMA: [external reference omitted]\n    - [external reference omitted]\n\n    Args:\n        dim (int): usually the multi-head attention dimension, should be divisible by 4 (TODO: relax this constraint if needed)\n        max_height (int): the maximum height of the 2D grid\n        max_width (int): the maximum width of the 2D grid\n        theta_base (float): the base of the theta\n        device (str): the device to store the precomputed cis\n    '
 
     def __init__(
         self, dim: int, max_height: int, max_width: int, theta_base=10000, device="cuda"

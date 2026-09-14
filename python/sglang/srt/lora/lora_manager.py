@@ -738,7 +738,7 @@ class LoRAManager:
             # should_apply_lora function to support mapping by full module name instead
             # of just the last part (e.g., "qkv_proj") to support scenarios with multiple
             # attention stacks (e.g., multimodal models).
-            # See: https://github.com/sgl-project/sglang/issues/6608
+            # See: [external reference omitted]
             if getattr(
                 self.base_model, "should_apply_lora", None
             ) and not self.base_model.should_apply_lora(module_name):

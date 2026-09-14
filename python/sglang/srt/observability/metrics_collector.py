@@ -788,7 +788,7 @@ class SchedulerMetricsCollector:
         )
 
         # This is a work-around Info metric since Info metrics are not supported in Prometheus.
-        # Similar to vLLM, https://github.com/vllm-project/vllm/blob/main/vllm/v1/metrics/loggers.py
+        # Similar to backend, [external reference omitted]
         # If more Info metrics are needed, we can create a common _log_info function.
         self.cache_config_info = Gauge(
             name="sglang:cache_config_info",
@@ -1387,7 +1387,7 @@ class TokenizerMetricsCollector:
         adjusted_interval = internval / num_new_tokens
 
         # A faster version of the Histogram::observe which observes multiple values at the same time.
-        # reference: https://github.com/prometheus/client_python/blob/v0.21.1/prometheus_client/metrics.py#L639
+        # reference: [external reference omitted]
         his = self.histogram_inter_token_latency.labels(**labels)
         his._sum.inc(internval)
 

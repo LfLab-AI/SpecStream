@@ -114,19 +114,7 @@ if _is_npu:
 def compute_yarn_parameters(
     config: PretrainedConfig,
 ) -> tuple[float, float, float, float]:
-    """
-    Refer to https://github.com/huggingface/transformers/blob/main/src/transformers/modeling_rope_utils.py#L197C1-L288C1
-    Computes the inverse frequencies with NTK scaling. Please refer to the
-    [original paper](https://huggingface.co/papers/2309.00071)
-    Args:
-        config ([`~transformers.PretrainedConfig`]):
-            The model configuration.
-    Returns:
-        factor: float, the scaling factor for the RoPE embeddings
-        low: float, the lower bound of the dimension range
-        high: float, the upper bound of the dimension range
-        attention_factor: float, the post-processing scaling factor applied to the computed cos/sin
-    """
+    '\n    Refer to [external reference omitted]\n    Computes the inverse frequencies with NTK scaling. Please refer to the\n    [original paper]([external reference omitted])\n    Args:\n        config ([`~transformers.PretrainedConfig`]):\n            The model configuration.\n    Returns:\n        factor: float, the scaling factor for the RoPE embeddings\n        low: float, the lower bound of the dimension range\n        high: float, the upper bound of the dimension range\n        attention_factor: float, the post-processing scaling factor applied to the computed cos/sin\n    '
 
     # The config does not contain rope_scaling, which means the model is not using yarn.
     # In transformers v5, rope_parameters is never None (even for default rope), so also
@@ -1075,7 +1063,7 @@ class Qwen3MoeForCausalLM(nn.Module):
                     num_layers // 2,
                     num_layers - 3,
                 ]
-            )  # Specific layers for EAGLE3 support
+            )  # Specific layers for backend support
         else:
             self.model.set_eagle3_layers_to_capture([val + 1 for val in layer_ids])
 

@@ -602,7 +602,7 @@ def _get_chunked_prefill_embedding(
     """
     embedding_list = []
     device = input_ids.device
-    # FIXME(Xinyuan): temporary workaround for eagle3
+    # FIXME(Xinyuan): temporary workaround for backend
     max_iterations = min(len(items_size) - 1, len(prefix_length))
 
     for i in range(max_iterations):

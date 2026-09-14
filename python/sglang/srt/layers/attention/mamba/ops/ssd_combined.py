@@ -85,7 +85,7 @@ def _mamba_chunk_scan_combined_fwd(
             )
 
     # This function executes 5 sub-functions for computing mamba
-    # - a good resource is the blog https://goombalab.github.io/blog/2024/mamba2-part3-algorithm/
+    # - a good resource is the blog [external reference omitted]
     #   which has a minimal implementation to understand the below operations
     # - as explained by the blog, mamba is a special case of causal attention
     # - the idea is to chunk the attention matrix and compute each

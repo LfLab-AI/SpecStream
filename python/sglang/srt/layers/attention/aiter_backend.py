@@ -791,7 +791,7 @@ class AiterAttnBackend(AttentionBackend):
             )
 
         elif forward_batch.forward_mode.is_draft_extend_v2():
-            # EAGLE V2: DRAFT_EXTEND_V2 mode - extend draft KV cache with all predicted tokens
+            # backend V2: DRAFT_EXTEND_V2 mode - extend draft KV cache with all predicted tokens
             self._ensure_spec_v2_topk_supported()
             if self.use_mla:
                 device = forward_batch.seq_lens.device
@@ -878,7 +878,7 @@ class AiterAttnBackend(AttentionBackend):
                     self.indices_updater_prefill.max_kv_len,
                 )
         elif forward_batch.forward_mode.is_draft_extend():
-            # EAGLE V1: DRAFT_EXTEND mode - uses spec_info.accept_length
+            # backend V1: DRAFT_EXTEND mode - uses spec_info.accept_length
             if self.use_mla:
                 kv_indices, kv_indptr, qo_indptr, custom_mask = (
                     spec_info.generate_attn_arg_prefill(
@@ -1485,7 +1485,7 @@ class AiterAttnBackend(AttentionBackend):
                     max_extend_len=max_q_len,
                 )
         elif forward_mode.is_draft_extend_v2():
-            # EAGLE V2: Uses fixed num_draft_tokens per batch
+            # backend V2: Uses fixed num_draft_tokens per batch
             self._ensure_spec_v2_topk_supported()
             num_tokens_per_bs = self._resolve_v2_num_draft_tokens()
             qo_indptr = self._set_uniform_qo_indptr(bs, num_tokens_per_bs, self.device)
@@ -1547,7 +1547,7 @@ class AiterAttnBackend(AttentionBackend):
                 num_kv_splits=num_kv_splits,
             )
         elif forward_mode.is_draft_extend():
-            # EAGLE V1: Uses speculative_num_steps + 1
+            # backend V1: Uses speculative_num_steps + 1
             num_tokens_per_bs = self.speculative_num_steps + 1
             qo_indptr = self.qo_indptr[: bs + 1]
             qo_indptr[: bs + 1] = torch.arange(
@@ -1868,7 +1868,7 @@ class AiterAttnBackend(AttentionBackend):
                     max_extend_len=max_q_len,
                 )
         elif forward_mode.is_draft_extend_v2():
-            # EAGLE V2: Fixed num_draft_tokens per batch
+            # backend V2: Fixed num_draft_tokens per batch
             self._ensure_spec_v2_topk_supported()
             seq_lens = seq_lens[:bs]
             num_tokens_per_bs = self._resolve_v2_num_draft_tokens()
@@ -1938,7 +1938,7 @@ class AiterAttnBackend(AttentionBackend):
                 num_kv_splits=num_kv_splits,
             )
         elif forward_mode.is_draft_extend():
-            # EAGLE V1: Uses spec_info.accept_length
+            # backend V1: Uses spec_info.accept_length
             num_tokens_per_bs = self.speculative_num_steps + 1
             seq_lens = seq_lens[:bs]
             accept_lens = spec_info.accept_length[:bs]

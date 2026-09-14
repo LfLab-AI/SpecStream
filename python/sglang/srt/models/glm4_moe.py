@@ -1130,7 +1130,7 @@ class Glm4MoeForCausalLM(nn.Module):
         )
         self.logits_processor = LogitsProcessor(config)
 
-        # For EAGLE3 support
+        # For backend support
         self.capture_aux_hidden_states = False
 
     def determine_num_fused_shared_experts(self):

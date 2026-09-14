@@ -127,7 +127,7 @@ def _ntuple(n):
 
 def _trunc_normal_(tensor, mean, std, a, b):
     # Cut & paste from PyTorch official master until it's in a few official releases - RW
-    # Method based on https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
+    # Method based on [external reference omitted]
     def norm_cdf(x):
         # Computes standard normal cumulative distribution function
         return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
@@ -228,25 +228,7 @@ def resample_patch_embed(
     antialias: bool = True,
     verbose: bool = False,
 ):
-    """Resample the weights of the patch embedding kernel to target resolution.
-    We resample the patch embedding kernel by approximately inverting the effect
-    of patch resizing.
-
-    Code based on:
-      https://github.com/google-research/big_vision/blob/b00544b81f8694488d5f36295aeb7972f3755ffe/big_vision/models/proj/flexi/vit.py
-
-    With this resizing, we can for example load a B/8 filter into a B/16 model
-    and, on 2x larger input image, the result will match.
-
-    Args:
-        patch_embed: original parameter to be resized.
-        new_size (tuple(int, int): target shape (height, width)-only.
-        interpolation (str): interpolation for resize
-        antialias (bool): use anti-aliasing filter in resize
-        verbose (bool): log operation
-    Returns:
-        Resized patch embedding kernel.
-    """
+    'Resample the weights of the patch embedding kernel to target resolution.\n    We resample the patch embedding kernel by approximately inverting the effect\n    of patch resizing.\n\n    Code based on:\n      [external reference omitted]\n\n    With this resizing, we can for example load a B/8 filter into a B/16 model\n    and, on 2x larger input image, the result will match.\n\n    Args:\n        patch_embed: original parameter to be resized.\n        new_size (tuple(int, int): target shape (height, width)-only.\n        interpolation (str): interpolation for resize\n        antialias (bool): use anti-aliasing filter in resize\n        verbose (bool): log operation\n    Returns:\n        Resized patch embedding kernel.\n    '
     import numpy as np
 
     try:
@@ -473,15 +455,7 @@ class Mlp(nn.Module):
 def drop_path(
     x, drop_prob: float = 0.0, training: bool = False, scale_by_keep: bool = True
 ):
-    """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
-
-    This is the same as the DropConnect impl I created for EfficientNet, etc networks, however,
-    the original name is misleading as 'Drop Connect' is a different form of dropout in a separate paper...
-    See discussion: https://github.com/tensorflow/tpu/issues/494#issuecomment-532968956 ... I've opted for
-    changing the layer and argument names to 'drop path' rather than mix DropConnect as a layer name and use
-    'survival rate' as the argument.
-
-    """
+    "Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).\n\n    This is the same as the DropConnect impl I created for EfficientNet, etc networks, however,\n    the original name is misleading as 'Drop Connect' is a different form of dropout in a separate paper...\n    See discussion: [external reference omitted] ... I've opted for\n    changing the layer and argument names to 'drop path' rather than mix DropConnect as a layer name and use\n    'survival rate' as the argument.\n\n    "
     if drop_prob == 0.0 or not training:
         return x
     keep_prob = 1 - drop_prob
@@ -562,9 +536,7 @@ LayerType = Union[str, Callable, Type[torch.nn.Module]]
 
 
 class PatchDropout(nn.Module):
-    """
-    https://arxiv.org/abs/2212.00794 and https://arxiv.org/pdf/2208.07220
-    """
+    '\n    [external reference omitted] and [external reference omitted]\n    '
 
     return_indices: torch.jit.Final[bool]
 
@@ -685,11 +657,7 @@ def init_weights_vit_timm(module: nn.Module, name: str = "") -> None:
 
 
 class VisionTransformer(nn.Module):
-    """Vision Transformer
-
-    A PyTorch impl of : `An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale`
-        - https://arxiv.org/abs/2010.11929
-    """
+    'Vision Transformer\n\n    A PyTorch impl of : `An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale`\n        - [external reference omitted]\n    '
 
     dynamic_img_size: Final[bool]
 

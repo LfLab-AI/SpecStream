@@ -62,7 +62,7 @@ def tensor_ms2torch(x: "ms.Tensor"):
     return torch_tensor
 
 
-# Adapt from: https://gitee.com/mindspore/vllm-mindspore/blob/master/vllm_mindspore/model_executor/models/attention_mask.py
+# Adapt from: [external reference omitted]
 class LowerTriangularMask:
     r"""
     Provide Infer model attention mask.
@@ -318,7 +318,7 @@ class MindSporeForCausalLM(torch.nn.Module):
         # prepare model inputs
         model_inputs = self.model.prepare_inputs(forward_batch, model_inputs)
 
-        # Used by speculative decoding (EAGLE)
+        # Used by speculative decoding (backend)
         if self.model.capture_aux_hidden_states:
             logits, hidden_states = self.model(**model_inputs)
         else:

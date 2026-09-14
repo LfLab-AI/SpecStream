@@ -1,4 +1,4 @@
-# copy from https://huggingface.co/OpenGVLab/InternVL3-1B
+# copy from [external reference omitted]
 import torch
 import torchvision.transforms as T
 from PIL import Image

@@ -1,11 +1,4 @@
-"""
-Conv2d/Conv3d layers with unfold+linear optimization for patch embeddings.
-
-When kernel_size == stride, padding == 0, dilation == 1, groups == 1, the conv
-is equivalent to unfold + F.linear, which is significantly faster on CUDA and
-also avoids the PyTorch 2.9.1 + CuDNN < 9.15 Conv3d bug
-(https://github.com/pytorch/pytorch/issues/168167).
-"""
+'\nConv2d/Conv3d layers with unfold+linear optimization for patch embeddings.\n\nWhen kernel_size == stride, padding == 0, dilation == 1, groups == 1, the conv\nis equivalent to unfold + F.linear, which is significantly faster on CUDA and\nalso avoids the PyTorch 2.9.1 + CuDNN < 9.15 Conv3d bug\n([external reference omitted]).\n'
 
 import math
 from typing import Tuple, Union

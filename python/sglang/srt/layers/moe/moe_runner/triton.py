@@ -55,7 +55,7 @@ if _is_cuda or _is_hip:
 
                 _has_vllm = True
             except ImportError:
-                # Fallback: vllm not available, will use triton moe_sum
+                # Fallback: backend not available, will use triton moe_sum
                 _has_vllm = False
 elif _is_cpu and _is_cpu_amx_available:
     pass
@@ -327,7 +327,7 @@ class TritonRunnerCore(MoeRunnerCore):
                     out_hidden_states,
                 )
             else:
-                # Fallback: use triton moe_sum when vllm is not available
+                # Fallback: use triton moe_sum when backend is not available
                 moe_sum_reduce_triton(
                     intermediate_cache3.view(*intermediate_cache3.shape),
                     out_hidden_states,

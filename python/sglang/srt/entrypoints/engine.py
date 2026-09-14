@@ -1131,7 +1131,7 @@ def _set_envs_and_config(server_args: ServerArgs):
                 "0.6.7.post2",
                 "Please uninstall the old version and "
                 "reinstall the latest version by following the instructions "
-                "at https://docs.flashinfer.ai/installation.html.",
+                "at [dependency documentation]",
             )
         if _is_cuda:
             assert_pkg_version(

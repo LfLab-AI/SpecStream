@@ -260,7 +260,7 @@ class TopK(MultiPlatformOp):
         fused_shared_experts_scaling_factor: Optional[float] = None,
     ):
         # NOTE: scoring_func is not used for now, but we keep it for future use
-        # see https://github.com/sgl-project/sglang/pull/4505 for more details
+        # see [external reference omitted] for more details
         super().__init__()
 
         if use_grouped_topk:

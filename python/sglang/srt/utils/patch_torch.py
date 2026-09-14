@@ -38,7 +38,7 @@ SGLANG_TP_RANK = None
 
 
 def monkey_patch_torch_reductions():
-    """Monkey patching before Torch https://github.com/pytorch/pytorch/pull/149248 is fixed"""
+    'Monkey patching before Torch [external reference omitted] is fixed'
 
     if not _is_npu:
         if hasattr(reductions, "_reduce_tensor_original"):

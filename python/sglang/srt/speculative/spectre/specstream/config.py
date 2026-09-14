@@ -5,7 +5,7 @@ from typing import Iterable
 
 
 def should_initialize_drafter_smctrl(server_args) -> bool:
-    """True only for the standalone remote SPECTRE Drafter process."""
+    'True only for the standalone remote backend Drafter process.'
 
     return bool(
         getattr(server_args, "specstream_smctrl_enabled", False)
@@ -240,12 +240,7 @@ class SpecStreamConfig:
 
     @property
     def control_runtime_enabled(self) -> bool:
-        """Whether profiling/control may run around the SPECTRE Target.
-
-        ``enabled`` selects tiered CPU/GPU KV. ``profile_only`` deliberately
-        leaves native SPECTRE KV resident on GPU while exposing the same
-        co-execution and TP-straggler controllers for isolated experiments.
-        """
+        'Whether profiling/control may run around the backend Target.\n\n        ``enabled`` selects tiered CPU/GPU KV. ``profile_only`` deliberately\n        leaves native backend KV resident on GPU while exposing the same\n        co-execution and TP-straggler controllers for isolated experiments.\n        '
 
         return bool(self.enabled or self.profile_only)
 

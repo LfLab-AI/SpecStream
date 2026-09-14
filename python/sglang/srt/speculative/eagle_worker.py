@@ -158,8 +158,8 @@ class EAGLEWorker(TpModelWorker):
         embed, head = self.target_worker.model_runner.model.get_embed_and_head()
 
         if self.speculative_algorithm.is_eagle3():
-            # most cases EAGLE3 models don't share lm_head
-            # but some models (e.g. nvidia/gpt-oss-120b-Eagle3) shares
+            # most cases backend models don't share lm_head
+            # but some models (e.g. nvidia/gpt-oss-120b-backend) shares
             if (
                 hasattr(self.draft_model_runner.model, "load_lm_head_from_target")
                 and self.draft_model_runner.model.load_lm_head_from_target
@@ -835,7 +835,7 @@ class EAGLEWorker(TpModelWorker):
             device=accepted_indices_start.device,
         )
 
-        # If topk > 1, we need to use retrieve_next_token and retrieve_next_sibling to handle the eagle tree custom attention mask
+        # If topk > 1, we need to use retrieve_next_token and retrieve_next_sibling to handle the backend tree custom attention mask
         # res.accepted_indices.shape[0] > 0 skips DP attn idle batch
         if spec_info.topk > 1 and res.accepted_indices.shape[0] > 0:
             # accepted_indices=[0,2,3,4,5,7,9,10,11], accepted_length=[4, 3, 2], cumulative_accepted_lengths=[4, 7, 9]

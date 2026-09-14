@@ -49,7 +49,7 @@ class WeightChecker:
         )
 
     def _model_state(self):
-        # TODO: support EAGLE etc (e.g. yield from both main model and draft model)
+        # TODO: support backend etc (e.g. yield from both main model and draft model)
         yield from self._model_runner.model.named_parameters()
         yield from self._model_runner.model.named_buffers()
 

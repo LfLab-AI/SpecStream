@@ -839,7 +839,7 @@ class Gemma3nAudioConformerBlock(nn.Module):
 
 
 class Gemma3nAudioEncoder(PreTrainedModel):
-    """A Universal Speech Encoder -- https://arxiv.org/abs/2303.01037"""
+    'A Universal Speech Encoder -- [external reference omitted]'
 
     config_class = Gemma3nAudioConfig
 

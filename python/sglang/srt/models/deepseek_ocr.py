@@ -396,18 +396,7 @@ def add_decomposed_rel_pos(
     q_size: Tuple[int, int],
     k_size: Tuple[int, int],
 ) -> torch.Tensor:
-    """
-    Calculate decomposed Relative Positional Embeddings from :paper:`mvitv2`.
-    https://github.com/facebookresearch/mvit/blob/19786631e330df9f3622e5402b4a419a263a2c80/mvit/models/attention.py   # noqa B950
-    Args:
-        q (Tensor): query q in the attention layer with shape (B, q_h * q_w, C).
-        rel_pos_h (Tensor): relative position embeddings (Lh, C) for height axis.
-        rel_pos_w (Tensor): relative position embeddings (Lw, C) for width axis.
-        q_size (Tuple): spatial sequence size of query q with (q_h, q_w).
-        k_size (Tuple): spatial sequence size of key k with (k_h, k_w).
-    Returns:
-        attn (Tensor): attention map with added relative positional embeddings.
-    """
+    '\n    Calculate decomposed Relative Positional Embeddings from :paper:`mvitv2`.\n    [external reference omitted]   # noqa B950\n    Args:\n        q (Tensor): query q in the attention layer with shape (B, q_h * q_w, C).\n        rel_pos_h (Tensor): relative position embeddings (Lh, C) for height axis.\n        rel_pos_w (Tensor): relative position embeddings (Lw, C) for width axis.\n        q_size (Tuple): spatial sequence size of query q with (q_h, q_w).\n        k_size (Tuple): spatial sequence size of key k with (k_h, k_w).\n    Returns:\n        attn (Tensor): attention map with added relative positional embeddings.\n    '
     q_h, q_w = q_size
     k_h, k_w = k_size
     Rh = get_rel_pos(q_h, k_h, rel_pos_h)

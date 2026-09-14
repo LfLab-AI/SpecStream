@@ -248,9 +248,7 @@ class ZmqEventPublisher(EventPublisher):
             pass  # Do not terminate context; other sockets may use it
 
     def _socket_setup(self) -> None:
-        """Initialize sockets
-        https://pyzmq.readthedocs.io/en/v19.0.0/morethanbindings.html#thread-safety
-        """
+        'Initialize sockets\n        [external reference omitted]\n        '
         if self._pub is None:
             self._pub = self._ctx.socket(zmq.PUB)
             self._pub.set_hwm(self._hwm)

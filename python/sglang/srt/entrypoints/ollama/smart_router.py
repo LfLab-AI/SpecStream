@@ -1,19 +1,4 @@
-"""
-Smart Router: Automatically routes requests between local Ollama and remote SGLang.
-
-Uses an LLM judge to classify tasks as simple or complex, then routes accordingly:
-- Simple tasks → Local Ollama (fast response)
-- Complex tasks → Remote SGLang (powerful model)
-
-Usage:
-    from sglang.srt.entrypoints.ollama.smart_router import SmartRouter
-
-    router = SmartRouter(
-        local_host="http://localhost:11434",
-        remote_host="http://sglang-server:30001",
-    )
-    response = router.chat("Hello!")
-"""
+'\nSmart Router: Automatically routes requests between local Ollama and remote SGLang.\n\nUses an LLM judge to classify tasks as simple or complex, then routes accordingly:\n- Simple tasks → Local Ollama (fast response)\n- Complex tasks → Remote SGLang (powerful model)\n\nUsage:\n    from sglang.srt.entrypoints.ollama.smart_router import SmartRouter\n\n    router = SmartRouter(\n        local_host="[external reference omitted]",\n        remote_host="[external reference omitted]",\n    )\n    response = router.chat("Hello!")\n'
 
 from typing import Optional
 

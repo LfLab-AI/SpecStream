@@ -24,14 +24,7 @@ from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcach
 
 
 class XPUAttentionBackend(AttentionBackend):
-    """XPU FlashAttention backend, currently based on FlashAttentionBackend, will be refactored later.
-
-    TODO:
-    - Prefill and Decode disaggregation, currently only chunked prefill is supported
-    - Speculative Decoding support
-    - XPU Graph support, see https://github.com/pytorch/pytorch/issues/162143
-    - MLA support
-    """
+    'XPU FlashAttention backend, currently based on FlashAttentionBackend, will be refactored later.\n\n    TODO:\n    - Prefill and Decode disaggregation, currently only chunked prefill is supported\n    - Speculative Decoding support\n    - XPU Graph support, see [external reference omitted]\n    - MLA support\n    '
 
     def __init__(
         self,
@@ -186,7 +179,7 @@ class XPUAttentionBackend(AttentionBackend):
                 metadata.page_table = forward_batch.req_to_token_pool.req_to_token[
                     forward_batch.req_pool_indices, : metadata.max_seq_len_k
                 ]
-            # TODO: we need to test this part for llama 4 eagle case
+            # TODO: we need to test this part for llama 4 backend case
             self._init_local_attn_metadata(forward_batch, metadata, device)
         elif forward_batch.forward_mode.is_target_verify():
             if self.topk <= 1:

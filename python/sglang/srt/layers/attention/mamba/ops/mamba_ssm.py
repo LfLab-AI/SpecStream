@@ -317,32 +317,7 @@ def selective_state_update(
     retrieve_parent_token=None,
     intermediate_state_indices=None,
 ):
-    """
-    Argument:
-        state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
-        x: (batch, dim) or (batch, nheads, dim) for single-token or (batch, T, nheads, dim) for multi-token
-        dt: (batch, dim) or (batch, nheads, dim)
-        A: (dim, dstate) or (nheads, dim, dstate)
-        B: (batch, dstate) or (batch, ngroups, dstate) for single-token or (batch, T, ngroups, dstate) for multi-token
-        C: (batch, dstate) or (batch, ngroups, dstate)
-        D: (dim,) or (nheads, dim)
-        z: (batch, dim) or (batch, nheads, dim)
-        dt_bias: (dim,) or (nheads, dim)
-        pad_slot_id: int
-            if cache_indices is passed, lets the kernel identify padded
-            entries that will not be processed,
-            for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]
-            in this case, the kernel will not process entries at
-            indices 0 and 3
-        out: Preallocated ssm output tensor. Assume same shape as x.
-             In-place updated.
-        disable_state_update: If True, don't write back to state (for speculative verify)
-        intermediate_states_buffer: Buffer to cache intermediate states
-        cache_steps: Total number of steps in the buffer
-        retrieve_parent_token: (batch, T) tensor of parent token indices for EAGLE tree attention
-        intermediate_state_indices: (batch,) tensor of indices for intermediate_states_buffer operations.
-            If provided, uses these indices instead of state_batch_indices for the buffer.
-    """
+    "\n    Argument:\n        state: (batch, dim, dstate) or (batch, nheads, dim, dstate)\n        x: (batch, dim) or (batch, nheads, dim) for single-token or (batch, T, nheads, dim) for multi-token\n        dt: (batch, dim) or (batch, nheads, dim)\n        A: (dim, dstate) or (nheads, dim, dstate)\n        B: (batch, dstate) or (batch, ngroups, dstate) for single-token or (batch, T, ngroups, dstate) for multi-token\n        C: (batch, dstate) or (batch, ngroups, dstate)\n        D: (dim,) or (nheads, dim)\n        z: (batch, dim) or (batch, nheads, dim)\n        dt_bias: (dim,) or (nheads, dim)\n        pad_slot_id: int\n            if cache_indices is passed, lets the kernel identify padded\n            entries that will not be processed,\n            for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]\n            in this case, the kernel will not process entries at\n            indices 0 and 3\n        out: Preallocated ssm output tensor. Assume same shape as x.\n             In-place updated.\n        disable_state_update: If True, don't write back to state (for speculative verify)\n        intermediate_states_buffer: Buffer to cache intermediate states\n        cache_steps: Total number of steps in the buffer\n        retrieve_parent_token: (batch, T) tensor of parent token indices for backend tree attention\n        intermediate_state_indices: (batch,) tensor of indices for intermediate_states_buffer operations.\n            If provided, uses these indices instead of state_batch_indices for the buffer.\n    "
     if state.dim() == 3:
         state = state.unsqueeze(1)
     if x.dim() == 2:

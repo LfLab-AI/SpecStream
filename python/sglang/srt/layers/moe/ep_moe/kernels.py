@@ -282,7 +282,7 @@ def pre_reorder_for_cutlass_moe(
     )
 
 
-# copy from https://github.com/ModelTC/lightllm/blob/a000ab69098654df4731f5b12587dd4e7f0a4f41/lightllm/common/fused_moe/moe_silu_and_mul_mix_quant_ep.py
+# copy from [external reference omitted]
 @triton.jit
 def _silu_and_mul_post_quant_kernel(
     input_ptr,
@@ -710,7 +710,7 @@ def _fwd_kernel_ep_scatter_2(
                 )
 
 
-# copy from https://github.com/ModelTC/lightllm/blob/main/lightllm/common/fused_moe/deepep_scatter_gather.py
+# copy from [external reference omitted]
 @torch.no_grad()
 def ep_scatter(
     recv_x: torch.Tensor,
@@ -892,7 +892,7 @@ def ep_gather(
 
 
 # copy from
-# https://github.com/deepseek-ai/DeepGEMM/blob/bd2a77552886b98c205af12f8d7d2d61247c4b27/deep_gemm/jit_kernels/utils.py#L58
+# [external reference omitted]
 def get_tma_aligned_size(x: int, element_size: int) -> int:
     """
     Global memory address of TMA must be 16-byte aligned.
@@ -942,7 +942,7 @@ def _tma_align_input_scale_kernel(
         tl.store(output_offset, input_data, mask=k_offsets < k_div_block_size)
 
 
-# copy from https://github.com/ModelTC/lightllm/blob/main/lightllm/common/quantization/triton_quant/fp8/fp8act_quant_kernel.py
+# copy from [external reference omitted]
 def tma_align_input_scale(input_scale: torch.Tensor):
     assert input_scale.dim() == 2
     m, k_div_block_size = input_scale.shape
@@ -1060,7 +1060,7 @@ def moe_ep_deepgemm_preprocess(
     grid = lambda meta: (triton.cdiv(topk_ids.numel(), meta["BLOCK_SIZE"]),)
     compute_masked_m_triton_kernel[(num_local_experts,)](seg_indptr, masked_m)
 
-    # For masked grouped GEMM, shape M should be multiple of the block M (current block M: {block_m}) https://github.com/deepseek-ai/DeepGEMM/blob/main/deep_gemm/jit_kernels/m_grouped_gemm.py#L165
+    # For masked grouped GEMM, shape M should be multiple of the block M (current block M: {block_m}) [external reference omitted]
     m_max = (hidden_states.size(0) // 256 + 1) * 256
     expected_m = (topk_ids.numel() - 1) // num_local_experts + 1
     gateup_input = torch.empty(

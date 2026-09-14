@@ -176,7 +176,7 @@ class FlashAttentionBackend(AttentionBackend):
 
         # If num_splits == 0, we use a heuristic to automatically determine the number of splits.
         # We set nums splits to 1 if deterministic inference is enabled.
-        # See https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/ for more details.
+        # See [external reference omitted] for more details.
         # Furthermore, FA4 does not support num_splits=0 with CUDA Graph, so we set num_splits to 1 if CUDA Graph is enabled.
         self.num_splits = (
             1
@@ -292,7 +292,7 @@ class FlashAttentionBackend(AttentionBackend):
                 metadata.page_table = forward_batch.req_to_token_pool.req_to_token[
                     forward_batch.req_pool_indices, : metadata.max_seq_len_k
                 ]
-            # TODO: we need to test this part for llama 4 eagle case
+            # TODO: we need to test this part for llama 4 backend case
             self._maybe_init_local_attn_metadata(forward_batch, metadata, device)
         elif forward_batch.forward_mode.is_target_verify():
             # Get dynamic draft_token_num from spec_info for flexible speculative decoding
@@ -1851,7 +1851,7 @@ class FlashAttentionBackend(AttentionBackend):
                         metadata_expand.page_table[:num_seqs, :decode_length].copy_(
                             cache_loc[:, :decode_length]
                         )
-                # TODO: Handle local attention metadata for draft decode when llama4 eagle is supported
+                # TODO: Handle local attention metadata for draft decode when llama4 backend is supported
             else:
                 # Normal Decode
                 metadata = self.decode_cuda_graph_metadata[bs]
@@ -3055,7 +3055,7 @@ def make_local_attention_virtual_batches(
         local_blocks * pages_per_local_batch,
     )
 
-    # NOTE: https://github.com/pytorch/pytorch/pull/160256 causes performance
+    # NOTE: [external reference omitted] causes performance
     # regression when using numpy arrays (batch and block indices) to index into
     # torch tensor (block_table). As a workaround, convert numpy arrays to torch
     # tensor first, which recovers perf.

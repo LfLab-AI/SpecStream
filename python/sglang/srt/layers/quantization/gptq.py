@@ -116,10 +116,7 @@ class MarlinLinearLayerConfig:
 
 
 class GPTQConfig(QuantizationConfig):
-    """Config class for GPTQ.
-
-    Reference: https://arxiv.org/abs/2210.17323
-    """
+    'Config class for GPTQ.\n\n    Reference: [external reference omitted]\n    '
 
     def __init__(
         self,
@@ -141,7 +138,7 @@ class GPTQConfig(QuantizationConfig):
         # Negative matching will skip quantization init for this module
         # entirely:
         # non-quantized inference. More details and quantization examples can be
-        # found at: https://github.com/ModelCloud/GPTQModel
+        # found at: [external reference omitted]
         # Example:
         #  # last 1/2 of the layers 10-21 has 8bit vs 4bit for 0-9
         #  # last 1/4 of the layers 16-21 has 8bit and group_size 64
@@ -289,7 +286,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         # Negative matching will skip quantization init for this module
         # entirely:
         # non-quantized inference. More details and quantization examples can be
-        # found at: https://github.com/ModelCloud/GPTQModel
+        # found at: [external reference omitted]
         # Example:
         #  # last 1/2 of the layers 10-21 has 8bit vs 4bit for 0-9
         #  # last 1/4 of the layers 16-21 has 8bit and group_size 64

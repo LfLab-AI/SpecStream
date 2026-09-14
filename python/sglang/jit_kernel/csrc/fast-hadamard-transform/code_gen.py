@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-# From https://en.wikipedia.org/wiki/Paley_construction (construction II for q = 5)
+# From [external reference omitted] (construction II for q = 5)
 
 had_12_paley = """
 +-++++++++++
@@ -19,7 +19,7 @@ had_12_paley = """
 +-+--+-++---
 """
 
-# From http://neilsloane.com/hadamard/
+# From [external reference omitted]
 
 had_12 = """
 +-----------

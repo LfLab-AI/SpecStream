@@ -185,13 +185,7 @@ def get_rope_shape_decorate(func):
 
 
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
-    """
-    From:
-    https://github.com/OpenGVLab/InternVideo/blob/421f6d2361fc8f61a3394244571f2601a4e99e29/InternVideo2/multi_modality/models/backbones/internvideo2/pos_embed.py#L86
-    embed_dim: output dimension for each position
-    pos: a list of positions to be encoded: size (M,)
-    out: (M, D)
-    """
+    '\n    From:\n    [external reference omitted]\n    embed_dim: output dimension for each position\n    pos: a list of positions to be encoded: size (M,)\n    out: (M, D)\n    '
     assert embed_dim % 2 == 0
     omega = np.arange(embed_dim // 2, dtype=np.float32)
     omega /= embed_dim / 2.0
@@ -292,22 +286,7 @@ class Learnable2DInterpPosEmbDivided_fixed(nn.Module):
 
 
 class Rope2DPosEmbRepeated(nn.Module):
-    """2D rotary position embedding with multi-resolution support.
-    This class is intended to be used in the following way:
-    1. Before training, create an instance of Rope2DPosEmb. This instance will hold the precomputed cis.
-    2. Before each forward pass, call `get_freqs_cis_by_*` to get the `freqs_cis` tensor for this iteration.
-    3. During the forward pass, pass the `freqs_cis` tensor to each attention layer, and call `apply` just before each attention operation.
-        The rope is shared across all attention layers and all heads.
-    Refs:
-    - RoFormer: https://arxiv.org/abs/2104.09864
-    - VisionLLaMA: https://arxiv.org/abs/2403.00522
-    - https://github.com/Meituan-AutoML/VisionLLaMA/blob/main/dit/models.py
-    Args:
-        dim (int): usually the multi-head attention dimension, should be divisible by 4 (TODO: relax this constraint if needed)
-        max_height (int): the maximum height of the 2D grid
-        max_width (int): the maximum width of the 2D grid
-        theta_base (float): the base of the theta
-    """
+    '2D rotary position embedding with multi-resolution support.\n    This class is intended to be used in the following way:\n    1. Before training, create an instance of Rope2DPosEmb. This instance will hold the precomputed cis.\n    2. Before each forward pass, call `get_freqs_cis_by_*` to get the `freqs_cis` tensor for this iteration.\n    3. During the forward pass, pass the `freqs_cis` tensor to each attention layer, and call `apply` just before each attention operation.\n        The rope is shared across all attention layers and all heads.\n    Refs:\n    - RoFormer: [external reference omitted]\n    - VisionLLaMA: [external reference omitted]\n    - [external reference omitted]\n    Args:\n        dim (int): usually the multi-head attention dimension, should be divisible by 4 (TODO: relax this constraint if needed)\n        max_height (int): the maximum height of the 2D grid\n        max_width (int): the maximum width of the 2D grid\n        theta_base (float): the base of the theta\n    '
 
     def __init__(self, dim: int, max_height: int, max_width: int, theta_base=10000):
         super().__init__()
@@ -678,7 +657,7 @@ def vision_tower_forward_auto(
 class KimiK25ForConditionalGeneration(nn.Module):
     # Support nvidia/Kimi-K2.5-NVFP4 naming: language_model.layers.*.
     # Ref: HF config.json for nvidia/Kimi-K2.5-NVFP4
-    # https://huggingface.co/nvidia/Kimi-K2.5-NVFP4/blob/main/config.json
+    # [external reference omitted]
     hf_to_sglang_mapper = WeightsMapper(
         orig_to_new_prefix={
             "language_model.layers.": "language_model.model.layers.",
@@ -841,7 +820,7 @@ class KimiK25ForConditionalGeneration(nn.Module):
     def set_eagle3_layers_to_capture(
         self, layer_ids: Optional[List[int]] = None
     ) -> None:
-        """Set the layers to capture for EAGLE3 speculative decoding."""
+        'Set the layers to capture for backend speculative decoding.'
         if not hasattr(self.language_model, "set_eagle3_layers_to_capture"):
             raise AttributeError(
                 "language_model does not support EAGLE3 speculative decoding."

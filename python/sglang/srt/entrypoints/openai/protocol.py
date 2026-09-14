@@ -179,7 +179,7 @@ ToolCallConstraint: TypeAlias = Union[
 
 
 class FileRequest(BaseModel):
-    # https://platform.openai.com/docs/api-reference/files/create
+    # [external reference omitted]
     file: bytes  # The File object (not file name) to be uploaded
     purpose: str = (
         "batch"  # The intended purpose of the uploaded file, default is "batch"
@@ -249,7 +249,7 @@ def _migrate_deprecated_dp_rank(values: dict) -> dict:
 
 class CompletionRequest(BaseModel):
     # Ordered by official OpenAI API documentation
-    # https://platform.openai.com/docs/api-reference/completions/create
+    # [external reference omitted]
     model: str = Field(
         default=DEFAULT_MODEL_NAME,
         description="Model name. Supports LoRA adapters via 'base-model:adapter-name' syntax.",
@@ -551,7 +551,7 @@ class ToolChoice(BaseModel):
 
 class ChatCompletionRequest(BaseModel):
     # Ordered by official OpenAI API documentation
-    # https://platform.openai.com/docs/api-reference/chat/create
+    # [external reference omitted]
     messages: List[ChatCompletionMessageParam]
     model: str = Field(
         default=DEFAULT_MODEL_NAME,
@@ -929,7 +929,7 @@ EmbeddingInput = Union[
 
 class EmbeddingRequest(BaseModel):
     # Ordered by official OpenAI API documentation
-    # https://platform.openai.com/docs/api-reference/embeddings/create
+    # [external reference omitted]
     input: EmbeddingInput
     model: str = DEFAULT_MODEL_NAME
     encoding_format: str = "float"
@@ -1164,7 +1164,7 @@ class ResponsesRequest(BaseModel):
     max_output_tokens: Optional[int] = None
     max_tool_calls: Optional[int] = None
     metadata: Optional[Dict[str, Any]] = None
-    model: Optional[str] = None  # Made optional to match vLLM
+    model: Optional[str] = None  # Made optional to match backend
     parallel_tool_calls: Optional[bool] = True
     previous_response_id: Optional[str] = None
     reasoning: Optional[ResponseReasoningParam] = None
@@ -1281,7 +1281,7 @@ class ResponsesResponse(BaseModel):
     tools: List[ResponseTool] = Field(default_factory=list)
 
     # OpenAI compatibility fields. not all are used at the moment.
-    # Recommend checking https://platform.openai.com/docs/api-reference/responses
+    # Recommend checking [external reference omitted]
     error: Optional[dict] = None
     incomplete_details: Optional[dict] = None  # TODO(v) support this input
     instructions: Optional[str] = None
@@ -1371,7 +1371,7 @@ class ResponsesResponse(BaseModel):
             },
             store=request.store,
             temperature=request.temperature,
-            text=text_format,  # TODO(v): Expand coverage per https://platform.openai.com/docs/api-reference/responses/list
+            text=text_format,  # TODO(v): Expand coverage per [external reference omitted]
             top_p=request.top_p,
             truncation=request.truncation,
             user=request.user,

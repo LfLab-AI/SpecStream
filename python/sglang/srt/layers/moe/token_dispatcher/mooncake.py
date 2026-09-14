@@ -119,7 +119,7 @@ class _MooncakeEPDispatcherImpl:
         except ImportError:
             raise ImportError(
                 "Mooncake EP is not installed. Please install Mooncake package at "
-                "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "
+                "[dependency documentation] "
                 "with EP support to run SGLang with Mooncake EP."
             )
         self.group = group

@@ -503,11 +503,7 @@ class QuarkKVCacheMethod(BaseKVCacheMethod):
 
     @staticmethod
     def validate_kv_cache_config(kv_cache_config: Optional[dict[str, Any]]):
-        """
-        Validator for the kv cache configuration. Useful for controlling the
-        kv cache quantization schemes, that are being supported in vLLM
-        :param kv_cache_config: the quark kv cache scheme
-        """
+        '\n        Validator for the kv cache configuration. Useful for controlling the\n        kv cache quantization schemes, that are being supported in backend\n        :param kv_cache_config: the quark kv cache scheme\n        '
         if kv_cache_config is None:
             return
 

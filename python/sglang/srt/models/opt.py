@@ -272,7 +272,7 @@ class OPTDecoder(nn.Module):
         # Note that the only purpose of `config._remove_final_layer_norm` is to
         # keep backward compatibility with checkpoints that have been fine-tuned
         # before transformers v4.20.1
-        # see https://github.com/facebookresearch/metaseq/pull/164
+        # see [external reference omitted]
         if config.do_layer_norm_before and not config._remove_final_layer_norm:
             self.final_layer_norm = nn.LayerNorm(
                 config.hidden_size,
@@ -620,7 +620,7 @@ class OPTForCausalLM(nn.Module):
         return self.model.embed_tokens.weight
 
     def set_embed(self, embed):
-        # NOTE: If draft hidden size != target hidden size, the embed weight cannot be shared for EAGLE3
+        # NOTE: If draft hidden size != target hidden size, the embed weight cannot be shared for backend
         if (
             hasattr(self.config, "target_hidden_size")
             and self.config.target_hidden_size != self.config.hidden_size

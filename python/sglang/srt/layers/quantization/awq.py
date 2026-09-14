@@ -97,10 +97,7 @@ def is_layer_skipped_awq(prefix: str, modules_to_not_convert: List[str]):
 
 
 class AWQConfig(QuantizationConfig):
-    """Config class for AWQ.
-
-    Reference: https://arxiv.org/abs/2306.00978
-    """
+    'Config class for AWQ.\n\n    Reference: [external reference omitted]\n    '
 
     def __init__(
         self,

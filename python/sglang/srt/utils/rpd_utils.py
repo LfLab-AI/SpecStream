@@ -1,4 +1,4 @@
-# https://raw.githubusercontent.com/ROCm/rocmProfileData/refs/heads/master/tools/rpd2tracing.py
+# [external reference omitted]
 # commit 92d13a08328625463e9ba944cece82fc5eea36e6
 def rpd_to_chrome_trace(
     input_rpd, output_json=None, start="0%", end="100%", format="object"

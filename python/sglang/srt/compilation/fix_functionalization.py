@@ -106,17 +106,7 @@ class FixFunctionalizationPass(SGLangInductorPass):
         node: torch.fx.Node,
         args: Optional[tuple[Union[torch.fx.Node, str], ...]] = None,
     ):
-        """
-        Insert a new defunctionalized node into the graph before node.
-        If one of the kwargs is 'out', provide args directly,
-        as node.kwargs cannot be used.
-        See https://github.com/pytorch/pytorch/blob/a00faf440888ffb724bad413f329a49e2b6388e7/torch/_inductor/lowering.py#L351
-
-        :param graph: Graph to insert the defunctionalized node into
-        :param node: The auto-functionalized node to defunctionalize
-        :param args: If we cannot use kwargs, specify args directly.
-        If an arg is a string, `node.kwargs[arg]` is used.
-        """  # noqa: E501
+        "\n        Insert a new defunctionalized node into the graph before node.\n        If one of the kwargs is 'out', provide args directly,\n        as node.kwargs cannot be used.\n        See [external reference omitted]\n\n        :param graph: Graph to insert the defunctionalized node into\n        :param node: The auto-functionalized node to defunctionalize\n        :param args: If we cannot use kwargs, specify args directly.\n        If an arg is a string, `node.kwargs[arg]` is used.\n        "  # noqa: E501
         assert is_func(
             node, auto_functionalized
         ), f"node must be auto-functionalized, is {node} instead"

@@ -353,7 +353,7 @@ def seqlens_expand_triton(
 # - stride: [8192, 128, 128, 1]
 # This will cause TMA desc validation fail in flashinfer (trtllm-mha backend).
 #
-# See: https://github.com/flashinfer-ai/flashinfer/issues/2232
+# See: [external reference omitted]
 def canonicalize_stride(tensor: torch.Tensor) -> torch.Tensor:
     """
     Adjust degenerate strides for a tensor, make it canonical.

@@ -25,7 +25,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     # Matrix dimensions
     dim: tl.constexpr,
     seqlen: tl.int32,  # cu_seqlen
-    num_cache_lines: tl.constexpr,  # added to support vLLM larger cache lines
+    num_cache_lines: tl.constexpr,  # added to support backend larger cache lines
     # Strides
     stride_x_seq: tl.constexpr,  # stride to get to next sequence,
     stride_x_dim: tl.constexpr,  # stride to get to next feature-value,
@@ -454,7 +454,7 @@ def causal_conv1d_fn(
     stride_istate_token = 0
     num_cache_lines = 0
     if conv_states is not None:
-        # extensions to support vLLM:
+        # extensions to support backend:
         # 1. conv_states is used to replaced initial_states
         # 2. conv_states serve as a cache with num cache lines can be larger than batch size
         # 3. mapping from sequence x[idx] to a cache line at index as specified via cache_indices[idx]
@@ -552,9 +552,9 @@ def causal_conv1d_fn(
     return out
 
 
-# HAS_EAGLE_TREE_CUSTOM_ATTN_MASK is added to support eagle tree attention mask
+# HAS_EAGLE_TREE_CUSTOM_ATTN_MASK is added to support backend tree attention mask
 # retrieve_next_token_ptr: [N, NP2_T], retrieve_next_sibling_ptr: [N, NP2_T]
-# e.g. for a sequence of length 4, the eagle tree attention structure is:
+# e.g. for a sequence of length 4, the backend tree attention structure is:
 # retrieve_next_token=[1, 3, -1, -1] -> retrieve_next_token[i]: the 1st child token of token i
 # retrieve_next_sibling=[-1, 2, -1, -1] -> retrieve_next_sibling[i]: the 1st tree sibling token of token i
 # retrieve_parent_token=[n/a, 0, 0, 1] -> retrieve_parent_token[i]: the parent token of token i
@@ -588,7 +588,7 @@ def _causal_conv1d_update_kernel(
     dim: tl.constexpr,
     seqlen: tl.constexpr,
     state_len: tl.constexpr,
-    num_cache_lines: tl.constexpr,  # added to support vLLM larger cache lines
+    num_cache_lines: tl.constexpr,  # added to support backend larger cache lines
     # Strides
     stride_x_seq: tl.constexpr,
     stride_x_dim: tl.constexpr,
@@ -796,7 +796,7 @@ def _causal_conv1d_update_kernel(
         acc = acc_preload
 
         if HAS_EAGLE_TREE_CUSTOM_ATTN_MASK:
-            # set the parent index of the next token in the eagle tree
+            # set the parent index of the next token in the backend tree
             # next token's parent is the current token
             retrieve_next_token_idx = tl.sum(
                 tl.where(idx_tokens == idx_token, retrieve_next_tokens, 0)
@@ -1020,7 +1020,7 @@ def causal_conv1d_update(
     out: (batch, dim) or (batch, dim, seqlen)
     """
     if validate_data:
-        assert cache_seqlens is None  # not implemented yet - ok for vLLM
+        assert cache_seqlens is None  # not implemented yet - ok for backend
         assert pad_slot_id is not None
         assert x.stride(1) == 1
     if isinstance(activation, bool):
@@ -1053,9 +1053,9 @@ def causal_conv1d_update(
 
         assert num_cache_lines >= batch
         assert weight.stride(1) == 1  # Need this
-        assert cache_seqlens is None  # not needed for vLLM - circular buffer
+        assert cache_seqlens is None  # not needed for backend - circular buffer
 
-    # adopt the strategy in vLLM that overwrite on 'x' directly, rather than creating a new tensor 'o'
+    # adopt the strategy in backend that overwrite on 'x' directly, rather than creating a new tensor 'o'
     out = torch.empty_like(x)
     stride_w_dim, stride_w_width = weight.stride()
 

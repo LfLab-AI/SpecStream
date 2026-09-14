@@ -214,7 +214,7 @@ class CustomAllreduce:
 
         # we cannot directly use `dist.all_gather_object` here
         # because it is incompatible with `gloo` backend under inference mode.
-        # see https://github.com/pytorch/pytorch/issues/126032 for details.
+        # see [external reference omitted] for details.
 
         handles = []
         offsets = []
@@ -238,7 +238,7 @@ class CustomAllreduce:
             log_info_on_rank0(logger, f"Registering {len(offset)} cuda graph addresses")
             # We cannot directly use `dist.all_gather_object` here
             # because it is incompatible with `gloo` backend under inference mode.
-            # see https://github.com/pytorch/pytorch/issues/126032 for details.
+            # see [external reference omitted] for details.
             all_data = [
                 [None, None] for _ in range(dist.get_world_size(group=self.group))
             ]

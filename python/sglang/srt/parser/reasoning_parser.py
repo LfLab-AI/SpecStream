@@ -211,7 +211,7 @@ class DeepSeekR1Detector(BaseReasoningFormatDetector):
             continue_final_message=continue_final_message,
             previous_content=previous_content,
         )
-        # https://github.com/sgl-project/sglang/pull/3202#discussion_r1950153599
+        # [external reference omitted]
 
 
 class Qwen3Detector(BaseReasoningFormatDetector):

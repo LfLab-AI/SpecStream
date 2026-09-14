@@ -223,7 +223,7 @@ def _get_quantization_config(
         quant_config = get_quant_config(
             model_config, load_config, packed_modules_mapping, remap_prefix
         )
-        # (yizhang2077) workaround for nvidia/Llama-4-Maverick-17B-128E-Eagle3
+        # (yizhang2077) workaround for nvidia/Llama-4-Maverick-17B-128E-backend
         if quant_config is None:
             return None
         if not _is_npu:
@@ -1801,7 +1801,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     loaded_weight = weight_sub_tensor.cuda()
 
                 # remove the following after the issue is fixed:
-                # https://github.com/bitsandbytes-foundation/bitsandbytes/issues/1342
+                # [external reference omitted]
                 if loaded_weight.is_contiguous() is False:
                     loaded_weight = loaded_weight.contiguous()
 
@@ -1939,7 +1939,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     num_elements[seq] = math.prod(quant_state.shape) // pack_ratio
 
                 offsets = np.concatenate(([0], np.cumsum(num_elements)))
-                # Make torch infer_schema happy(Compatible with vLLM)
+                # Make torch infer_schema happy(Compatible with backend)
                 offsets = torch.tensor(offsets).cpu()
                 set_weight_attrs(param, {"bnb_shard_offsets": offsets})
 
@@ -1993,14 +1993,7 @@ class GGUFModelLoader(BaseModelLoader):
             raise ValueError(f"{model_name_or_path} is not a file.")
 
     def _get_gguf_weights_map(self, model_config: ModelConfig):
-        """
-        GGUF uses this naming convention for their tensors from HF checkpoint:
-        `blk.N.BB.weight` and `blk.N.BB.bias`
-        where N signifies the block number of a layer, and BB signifies the
-        attention/mlp layer components.
-        See "Standardized tensor names" in
-        https://github.com/ggerganov/ggml/blob/master/docs/gguf.md for details.
-        """
+        '\n        GGUF uses this naming convention for their tensors from HF checkpoint:\n        `blk.N.BB.weight` and `blk.N.BB.bias`\n        where N signifies the block number of a layer, and BB signifies the\n        attention/mlp layer components.\n        See "Standardized tensor names" in\n        [external reference omitted] for details.\n        '
 
         # only load the gguf module when needed
         try:

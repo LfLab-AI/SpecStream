@@ -353,7 +353,7 @@ def maybe_init_custom_mem_pool(
 
 
 def convert_to_bigram_key(tokens: List[int]) -> List[Tuple[int, int]]:
-    # EAGLE uses bigram keys in the radix tree since draft sequence is the one-token-shifted version of target
+    # backend uses bigram keys in the radix tree since draft sequence is the one-token-shifted version of target
     # [1, 2, 3, 4] -> [(1,2), (2,3), (3,4)]
     if len(tokens) and isinstance(tokens[0], tuple):
         return tokens
@@ -370,7 +370,7 @@ def get_hash_str(token_ids: List[int], prior_hash: Optional[str] = None) -> str:
 
     for t in token_ids:
         if isinstance(t, tuple):
-            # EAGLE bigram mode: hash both elements to uniquely identify the bigram
+            # backend bigram mode: hash both elements to uniquely identify the bigram
             for elem in t:
                 hasher.update(elem.to_bytes(4, byteorder="little", signed=False))
         else:

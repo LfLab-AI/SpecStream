@@ -456,7 +456,7 @@ class SWARadixCache(BasePrefixCache):
             req.req_pool_idx, :kv_committed_len
         ]
 
-        # Maybe convert to bigram keys for EAGLE
+        # Maybe convert to bigram keys for backend
         keys = self.key_convert_fn(token_ids)
         keys = page_align_keys(keys, self.page_size)
         page_aligned_len = len(keys)

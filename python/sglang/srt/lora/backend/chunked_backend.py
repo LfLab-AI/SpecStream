@@ -22,14 +22,7 @@ MIN_CHUNK_SIZE = 16
 
 
 class ChunkedSgmvLoRABackend(BaseLoRABackend):
-    """
-    Chunked LoRA backend using segmented matrix-vector multiplication.
-
-    This backend is largely based on the SGMV (Segmented Gather Matrix-Vector multiplication) algorithm
-    introduced in the Punica paper (https://arxiv.org/pdf/2310.18547). One main variation made here is to
-    segment the input sequences into fixed-size chunks, which reduces excessive kernel launches especially
-    when the LoRA distribution is skewed.
-    """
+    '\n    Chunked LoRA backend using segmented matrix-vector multiplication.\n\n    This backend is largely based on the SGMV (Segmented Gather Matrix-Vector multiplication) algorithm\n    introduced in the Punica paper ([external reference omitted]). One main variation made here is to\n    segment the input sequences into fixed-size chunks, which reduces excessive kernel launches especially\n    when the LoRA distribution is skewed.\n    '
 
     name = "csgmv"
 

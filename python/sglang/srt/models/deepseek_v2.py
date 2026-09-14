@@ -1197,7 +1197,7 @@ class DeepseekV2AttentionMLA(
                 layer_id=layer_id,
                 alt_stream=alt_stream,
             )
-            # Refer: https://arxiv.org/abs/2603.12201 for more details.
+            # Refer: [external reference omitted] for more details.
             # skip_topk: when True, this layer will skip computation and reuse previous layer's topk indices.
             # next_skip_topk: when True, the next layer will skip computation and reuse this layer's topk indices.
             if is_nextn:

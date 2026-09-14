@@ -181,7 +181,7 @@ class FlashInferAttnBackend(AttentionBackend):
 
         # When deterministic inference is enabled, tensor cores should be used for decode
         # Also set split tile sizes for prefill and decode from environment variables, and disable kv split for cuda graph
-        # More information can be found here: https://github.com/flashinfer-ai/flashinfer/pull/1675
+        # More information can be found here: [external reference omitted]
         self.enable_deterministic = (
             model_runner.server_args.enable_deterministic_inference
         )
@@ -827,7 +827,7 @@ class FlashInferAttnBackend(AttentionBackend):
             if self.forward_metadata.extend_no_prefix:
                 # NOTE: FlashInfer currently has limitations with head_dim = 32 or other dimensions
                 # The FlashInfer head_dim limitation itself is tracked here:
-                # https://github.com/flashinfer-ai/flashinfer/issues/1048
+                # [external reference omitted]
                 o = self.prefill_wrapper_ragged.forward(
                     q.view(-1, layer.tp_q_head_num, layer.head_dim),
                     k.view(-1, layer.tp_k_head_num, layer.head_dim),

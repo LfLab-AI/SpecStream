@@ -470,8 +470,8 @@ def _decode_grouped_att_m_fwd(
     extra_kargs = {}
     num_stages = 2
     if _is_hip:
-        # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
-        # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+        # [external reference omitted]
+        # [external reference omitted]
         extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
         num_stages = 1
 
@@ -604,8 +604,8 @@ def _decode_softmax_reducev_fwd(
 
     extra_kargs = {}
     if _is_hip:
-        # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
-        # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
+        # [external reference omitted]
+        # [external reference omitted]
         extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
 
     grid = (batch, head_num)

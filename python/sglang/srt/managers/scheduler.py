@@ -452,7 +452,7 @@ class Scheduler(
         self.is_initializing = False
 
     def init_spectre_communication(self):
-        """Initialize Spectre communication."""
+        'Initialize backend communication.'
         role = self.server_args.spectre_role
         if role in ["target", "draft"]:
             from sglang.srt.speculative.spectre.spectre_communication import (

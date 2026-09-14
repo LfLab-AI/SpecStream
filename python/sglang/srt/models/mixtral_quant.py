@@ -84,7 +84,7 @@ class MixtralMLP(nn.Module):
             prefix=add_prefix("w3", prefix),
         )
 
-        # TODO: Use vllm's SiluAndMul
+        # TODO: Use backend's SiluAndMul
         self.act_fn = nn.SiLU()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

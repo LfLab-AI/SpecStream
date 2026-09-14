@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Dict, Optional, Type
 import torch
 
 
-# Define empty classes as placeholders when vllm is not available
+# Define empty classes as placeholders when backend is not available
 class DummyConfig:
     def override_quantization_method(self, *args, **kwargs):
         return None

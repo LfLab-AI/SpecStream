@@ -153,7 +153,7 @@ def normalize_e4m3fn_to_e4m3fnuz(
     assert weight.dtype == torch.float8_e4m3fn
     # The bits pattern 10000000(-128) represents zero in e4m3fn
     # but NaN in e4m3fnuz. So here we set it to 0.
-    # https://onnx.ai/onnx/technical/float8.html
+    # [external reference omitted]
     weight_as_int8 = weight.view(torch.int8)
     ROCM_FP8_NAN_AS_INT = -128
     weight_as_int8[weight_as_int8 == ROCM_FP8_NAN_AS_INT] = 0
@@ -162,7 +162,7 @@ def normalize_e4m3fn_to_e4m3fnuz(
     # For the same bits representation, e4m3fnuz value is half of
     # the e4m3fn value, so we should double the scaling factor to
     # get the same dequantized value.
-    # https://onnx.ai/onnx/technical/float8.html
+    # [external reference omitted]
     weight_scale = weight_scale * 2.0
     if input_scale is not None:
         input_scale = input_scale * 2.0
@@ -648,7 +648,7 @@ def deepgemm_w8a8_block_fp8_linear_with_fallback(
     output_dtype = input.dtype
     dtype_supported = output_dtype == torch.bfloat16
 
-    # TODO: https://github.com/sgl-project/sglang/pull/6890#issuecomment-2943395737
+    # TODO: [external reference omitted]
     shape_supported = weight.shape[0] % 64 == 0 and weight.shape[1] % 128 == 0
 
     if not (shape_supported and dtype_supported):
@@ -1543,7 +1543,7 @@ def apply_fp8_linear(
         else:
             # For now validated on ROCm platform
             # fp8 rowwise scaling in torch._scaled_mm is introduced in
-            # https://github.com/pytorch/pytorch/pull/144432 using hipBLASLt
+            # [external reference omitted] using hipBLASLt
             # and ROCm 6.3, which only exists in torch 2.7 and above.
             # For CUDA platform please validate if the
             # torch._scaled_mm support rowwise scaled GEMM

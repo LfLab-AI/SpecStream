@@ -132,7 +132,7 @@ register_chat_template(
 )
 
 # There is default system prompt for qwen
-# reference: https://modelscope.cn/models/qwen/Qwen2-72B-Instruct/file/view/master?fileName=tokenizer_config.json&status=1
+# reference: [external reference omitted]
 # The chat template is: "{% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n' }}{% endif %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
 register_chat_template(
     ChatTemplate(
@@ -148,7 +148,7 @@ register_chat_template(
     )
 )
 
-# Reference: https://huggingface.co/docs/transformers/main/model_doc/qwen2_vl#usage-example
+# Reference: [external reference omitted]
 register_chat_template(
     ChatTemplate(
         name="qwen2-vl",
@@ -164,7 +164,7 @@ register_chat_template(
     )
 )
 
-# Reference: https://github.com/lm-sys/FastChat/blob/main/docs/vicuna_weights_version.md#prompt-template
+# Reference: [external reference omitted]
 register_chat_template(
     ChatTemplate(
         name="vicuna_v1.1",
@@ -194,7 +194,7 @@ register_chat_template(
     )
 )
 
-# Reference: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/blob/main/chat_template.json
+# Reference: [external reference omitted]
 register_chat_template(
     ChatTemplate(
         name="mistral",
@@ -232,7 +232,7 @@ register_chat_template(
     )
 )
 
-# https://huggingface.co/openbmb/MiniCPM-V-2_6
+# [external reference omitted]
 register_chat_template(
     ChatTemplate(
         name="minicpmv",
@@ -270,7 +270,7 @@ register_chat_template(
     )
 )
 
-# https://huggingface.co/openbmb/MiniCPM-o-2_6
+# [external reference omitted]
 register_chat_template(
     ChatTemplate(
         name="minicpmo",
@@ -333,7 +333,7 @@ register_chat_template(
     )
 )
 
-# Reference: https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/chat_template.json
+# Reference: [external reference omitted]
 register_chat_template(
     ChatTemplate(
         name="llama-4",
@@ -357,7 +357,7 @@ register_chat_template(
     )
 )
 
-# Reference: https://modelscope.cn/models/01ai/Yi-1.5-34B-Chat/file/view/master?fileName=tokenizer_config.json&status=1
+# Reference: [external reference omitted]
 register_chat_template(
     ChatTemplate(
         name="yi-1.5",
@@ -372,7 +372,7 @@ register_chat_template(
     )
 )
 
-# Reference: https://github.com/01-ai/Yi/tree/main/VL#major-difference-with-llava
+# Reference: [external reference omitted]
 register_chat_template(
     ChatTemplate(
         name="yi-vl",
@@ -520,7 +520,7 @@ register_chat_template(
     )
 )
 
-# Reference: https://huggingface.co/docs/transformers/main/model_doc/glm4_v#usage-example
+# Reference: [external reference omitted]
 register_chat_template(
     ChatTemplate(
         name="glm-4v",

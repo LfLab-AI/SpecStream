@@ -196,7 +196,7 @@ def make_streaming_chunk_mask_generation(
     return causal_mask
 
 
-# Borrowed from `https://github.com/2noise/ChatTTS/blob/main/ChatTTS/model/dvae.py`
+# Borrowed from `[external reference omitted]
 class ConvNeXtBlock(nn.Module):
     def __init__(
         self,
@@ -250,7 +250,7 @@ class ConvNeXtBlock(nn.Module):
         return x
 
 
-# Borrowed from `https://github.com/2noise/ChatTTS/blob/main/ChatTTS/model/dvae.py`
+# Borrowed from `[external reference omitted]
 class DVAEDecoder(nn.Module):
     def __init__(
         self,
@@ -295,7 +295,7 @@ class DVAEDecoder(nn.Module):
         return x
 
 
-# Borrowed from `https://github.com/2noise/ChatTTS/blob/main/ChatTTS/model/dvae.py`
+# Borrowed from `[external reference omitted]
 class GFSQ(nn.Module):
     def __init__(
         self,
@@ -338,7 +338,7 @@ class GFSQ(nn.Module):
         return ind.transpose_(1, 2) if self.transpose else ind
 
 
-# Borrowed from `https://github.com/2noise/ChatTTS/blob/main/ChatTTS/model/dvae.py`
+# Borrowed from `[external reference omitted]
 class DVAE(nn.Module):
     def __init__(
         self,
@@ -419,7 +419,7 @@ class DVAE(nn.Module):
         return torch.mul(dec_out, self.coef, out=dec_out)
 
 
-# Borrowed from `https://github.com/2noise/ChatTTS/blob/main/ChatTTS/model/processors.py`
+# Borrowed from `[external reference omitted]
 class CustomRepetitionPenaltyLogitsProcessorRepeat:
     def __init__(self, penalty: float, max_input_ids: int, past_window: int):
         if not isinstance(penalty, float) or not (penalty > 0):
@@ -799,27 +799,7 @@ class ConditionalChatTTS(PreTrainedModel):
         ] = None,
         show_tqdm=False,
     ):
-        """Generate audio codes in streaming setting or non-streaming setting.
-        Specifically speaking, generate audio codes when not all text tokens are prefilled.
-
-        Always pass a valid `past_key_values` to the method. The method does not do `prefill` by itself. It relies on `prefill_text` method to provide valid `past_key_values`. Please refer to docstring of this class for more details.
-
-        In this method, we borrowed a lot of codes from `https://github.com/2noise/ChatTTS/blob/main/ChatTTS/model/gpt.py`.
-
-        Args:
-            input_ids (torch.Tensor): Input token ids.
-            past_key_values (List[Tuple[torch.Tensor, torch.Tensor]]): Past key values for attention mechanism.
-            temperature (torch.Tensor): Temperature for sampling.
-            eos_token (Union[int, torch.Tensor]): End of sequence token.
-            streaming_tts_text_mask (Optional[torch.Tensor], optional): Mask for streaming TTS text. Defaults to None.
-            max_new_token (int, optional): Maximum number of new tokens to generate. Defaults to 50.
-            logits_warpers (List[LogitsWarper], optional): List of logits warpers. Defaults to [].
-            logits_processors (List[CustomRepetitionPenaltyLogitsProcessorRepeat], optional): List of logits processors. Defaults to [].
-            show_tqdm (bool, optional): Whether to show progress bar. Defaults to True.
-
-        Returns:
-            GenerationOutputs: Generation outputs.
-        """
+        'Generate audio codes in streaming setting or non-streaming setting.\n        Specifically speaking, generate audio codes when not all text tokens are prefilled.\n\n        Always pass a valid `past_key_values` to the method. The method does not do `prefill` by itself. It relies on `prefill_text` method to provide valid `past_key_values`. Please refer to docstring of this class for more details.\n\n        In this method, we borrowed a lot of codes from `[external reference omitted]\n\n        Args:\n            input_ids (torch.Tensor): Input token ids.\n            past_key_values (List[Tuple[torch.Tensor, torch.Tensor]]): Past key values for attention mechanism.\n            temperature (torch.Tensor): Temperature for sampling.\n            eos_token (Union[int, torch.Tensor]): End of sequence token.\n            streaming_tts_text_mask (Optional[torch.Tensor], optional): Mask for streaming TTS text. Defaults to None.\n            max_new_token (int, optional): Maximum number of new tokens to generate. Defaults to 50.\n            logits_warpers (List[LogitsWarper], optional): List of logits warpers. Defaults to [].\n            logits_processors (List[CustomRepetitionPenaltyLogitsProcessorRepeat], optional): List of logits processors. Defaults to [].\n            show_tqdm (bool, optional): Whether to show progress bar. Defaults to True.\n\n        Returns:\n            GenerationOutputs: Generation outputs.\n        '
 
         # We only support batch size `1` for now
         assert input_ids.shape[0] == 1
@@ -1055,16 +1035,7 @@ class ConditionalChatTTS(PreTrainedModel):
         self,
         result_list: List[torch.Tensor],
     ):
-        """Decode discrete audio codes to mel spectrograms.
-
-        Borrowed from `https://github.com/2noise/ChatTTS/blob/main/ChatTTS/core.py`
-
-        Args:
-            result_list (List[torch.Tensor]): Audio codes output from `generate`.
-
-        Returns:
-            torch.Tensor: Mel spectrograms.
-        """
+        'Decode discrete audio codes to mel spectrograms.\n\n        Borrowed from `[external reference omitted]\n\n        Args:\n            result_list (List[torch.Tensor]): Audio codes output from `generate`.\n\n        Returns:\n            torch.Tensor: Mel spectrograms.\n        '
 
         decoder = self.dvae
         max_x_len = -1
@@ -1359,7 +1330,7 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
         for idx, encoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
-            # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
+            # add LayerDrop (see [external reference omitted] for description)
             to_drop = False
 
             # Ignore copy

@@ -411,7 +411,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             tensor = (tensor[:, :, None] >> shifter) & 0xF
 
             # 3. change order, see
-            # https://github.com/casper-hansen/AutoAWQ/blob/v0.2.8/awq/utils/quant_utils.py
+            # [external reference omitted]
             # shape -> (a, 4 * b * pack_factor_bit8)
             reverse_awq_pack_order = [0, 4, 1, 5, 2, 6, 3, 7]
             tensor = tensor.view(-1, 8)[:, reverse_awq_pack_order]

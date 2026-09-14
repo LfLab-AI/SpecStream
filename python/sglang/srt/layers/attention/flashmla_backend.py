@@ -603,7 +603,7 @@ class FlashMLAMultiStepDraftBackend:
 
     def init_forward_metadata_capture_cuda_graph(self, forward_batch: ForwardBatch):
         def call_fn(i, forward_batch):
-            # EAGLE draft worker uses DECODE mode for draft steps
+            # backend draft worker uses DECODE mode for draft steps
             from sglang.srt.model_executor.forward_batch_info import ForwardMode
 
             # Create a dummy forward_mode for draft step

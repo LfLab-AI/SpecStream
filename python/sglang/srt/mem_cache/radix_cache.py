@@ -479,7 +479,7 @@ class RadixCache(BasePrefixCache):
             req.req_pool_idx, : len(token_ids)
         ]
 
-        # Maybe convert to bigram keys for EAGLE
+        # Maybe convert to bigram keys for backend
         keys = convert_to_bigram_key(token_ids) if self.is_eagle else token_ids
         keys = page_align_keys(keys, self.page_size)
         values = kv_indices[: len(keys)].to(dtype=torch.int64, copy=True)
@@ -517,7 +517,7 @@ class RadixCache(BasePrefixCache):
             req.req_pool_idx, : len(token_ids)
         ]
 
-        # Maybe convert to bigram keys for EAGLE
+        # Maybe convert to bigram keys for backend
         keys = convert_to_bigram_key(token_ids) if self.is_eagle else token_ids
         keys = page_align_keys(keys, self.page_size)
         values = kv_indices[: len(keys)].to(dtype=torch.int64, copy=True)
@@ -562,7 +562,7 @@ class RadixCache(BasePrefixCache):
 
         # `req.prefix_indices` will be used in `PrefillAdder::add_chunked_req` later
         # - page_size != 1: there is a partial page at the end, keep the full kv_indices
-        # - eagle case: bigram keys will only cache len - 1 kv indices
+        # - backend case: bigram keys will only cache len - 1 kv indices
         if len(new_indices) < len(kv_indices):
             req.prefix_indices = torch.cat(
                 [new_indices, kv_indices[len(new_indices) :]]

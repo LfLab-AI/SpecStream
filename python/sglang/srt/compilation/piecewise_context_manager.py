@@ -124,5 +124,5 @@ def set_forward_context(
 PIECEWISE_CUDA_GRAPH_CAPTURE_FAILED_MSG = (
     "Piecewise CUDA Graph is enabled by default as an experimental feature.\n"
     "To work around this error, add --disable-piecewise-cuda-graph to your launch command.\n"
-    "Please report this issue at https://github.com/sgl-project/sglang/issues/new/choose"
+    "Please report this issue at [dependency documentation]"
 )

@@ -181,11 +181,7 @@ class QuickGELU(MultiPlatformOp):
 
 
 class XIELU(MultiPlatformOp):
-    """
-    Applies the xIELU activation function introduced in https://arxiv.org/abs/2411.13010
-    If the user has installed the nickjbrowning/XIELU, we import xIELU CUDA
-    Otherwise, we emit a single warning and use xIELU Python
-    """
+    '\n    Applies the xIELU activation function introduced in [external reference omitted]\n    If the user has installed the nickjbrowning/XIELU, we import xIELU CUDA\n    Otherwise, we emit a single warning and use xIELU Python\n    '
 
     def __init__(
         self,
@@ -237,7 +233,7 @@ class XIELU(MultiPlatformOp):
             # logger.warning_once(
             #     "CUDA-fused xIELU not available (%s) –"
             #     " falling back to a Python version.\n"
-            #     "For CUDA xIELU (experimental), `pip install git+https://github.com/nickjbrowning/XIELU`",
+            #     "For CUDA xIELU (experimental), `pip install git+[external reference omitted]",
             #     str(err),
             # )
 

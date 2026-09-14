@@ -187,7 +187,7 @@ class Gemma3Attention(nn.Module):
             else:
                 self.rope_theta = getattr(config, "rope_local_base_freq", 10000.0)
             self.rope_scaling = {"rope_type": "default"}
-            # FIXME(mick): idk why vllm does this
+            # FIXME(mick): idk why backend does this
             # self.sliding_window = config.interleaved_sliding_window
             self.sliding_window = get_attention_sliding_window_size(config)
         else:
@@ -493,7 +493,7 @@ class Gemma3RotaryEmbedding(nn.Module):
             self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
         )
         position_ids_expanded = position_ids[:, None, :].float()
-        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
+        # Force float32 (see [external reference omitted])
         device_type = x.device.type
         device_type = (
             device_type
@@ -548,7 +548,7 @@ class Gemma3TextModel(PreTrainedModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        # Gemma3 downcasts the below to float16, causing sqrt(3072)=55.4256 to become 55.5. See https://github.com/huggingface/transformers/pull/29402
+        # Gemma3 downcasts the below to float16, causing sqrt(3072)=55.4256 to become 55.5. See [external reference omitted]
         self.embed_tokens = Gemma3TextScaledWordEmbedding(
             config.vocab_size,
             config.hidden_size,
@@ -839,7 +839,7 @@ class Gemma3ForCausalLM(PreTrainedModel):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # lm_head is not used in vllm as it is tied with embed_token.
+                # lm_head is not used in backend as it is tied with embed_token.
                 # To prevent errors, skip loading lm_head.weight.
                 if "lm_head.weight" in name:
                     continue

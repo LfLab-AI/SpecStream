@@ -39,18 +39,7 @@ def _sampling_params_to_dict(sampling_params: SamplingParams) -> Dict[str, Any]:
 
 
 class SpectreAction(Enum):
-    """
-    SpectreAction is the action to take for the Spectre request.
-    draft: normal draft request (D->T & T->D)
-    finish: when req is finished in target (T->D)
-    abort: when req is aborted in target (T->D)
-    reject: when draft is high overhead (D->T)
-    grant: one Target-authorized Draft token step (T->D)
-    pause: revoke the active Draft execution grant (T->D)
-    grant_ack: one granted token step completed (D->T)
-    need_context: Drafter has no state for an incremental request and asks the
-        Target to resend the complete request context (D->T)
-    """
+    '\n    SpectreAction is the action to take for the backend request.\n    draft: normal draft request (D->T & T->D)\n    finish: when req is finished in target (T->D)\n    abort: when req is aborted in target (T->D)\n    reject: when draft is high overhead (D->T)\n    grant: one Target-authorized Draft token step (T->D)\n    pause: revoke the active Draft execution grant (T->D)\n    grant_ack: one granted token step completed (D->T)\n    need_context: Drafter has no state for an incremental request and asks the\n        Target to resend the complete request context (D->T)\n    '
 
     DRAFT = "draft"
     FINISH = "finish"
@@ -63,12 +52,7 @@ class SpectreAction(Enum):
 
 
 class SpecType(Enum):
-    """
-    SpecType is the type of the Spectre request. It is used to distinguish the type of the request.
-    normal: normal request
-    draft_request: draft request (D->T)
-    draft_response: draft response (T->D)
-    """
+    '\n    SpecType is the type of the backend request. It is used to distinguish the type of the request.\n    normal: normal request\n    draft_request: draft request (D->T)\n    draft_response: draft response (T->D)\n    '
 
     NORMAL = "normal"
     DRAFT_REQUEST = "draft_request"
@@ -96,7 +80,7 @@ class SpectreRequest:
     draft_send_time: float = -1.0
 
     # SpecStream execution-control plane.  These fields are deliberately
-    # separate from ``num_draft_tokens``, which remains the desired SPECTRE
+    # separate from ``num_draft_tokens``, which remains the desired backend
     # horizon rather than permission to launch CUDA work.
     grant_epoch: Optional[int] = None
     grant_tokens: Optional[int] = None

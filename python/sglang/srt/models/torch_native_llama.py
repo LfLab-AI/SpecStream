@@ -14,31 +14,7 @@
 
 # Adapted from
 # https://github.com/vllm-project/vllm/blob/c7f2cf2b7f67bce5842fedfdba508440fe257375/vllm/model_executor/models/llama.py#L1
-"""
-Inference-only LLaMA model compatible with HuggingFace weights.
-
-This model supports tensor parallelism (TP) using the PyTorch tensor parallel package.
-Reference: https://pytorch.org/docs/stable/distributed.tensor.parallel.html
-
-Here is a quick example to enable TP:
-```python
-from sglang.srt.layers.model_parallel import tensor_parallel
-
-device_mesh = torch.distributed.init_device_mesh("cuda", (tp_size,))
-tensor_parallel(model, device_mesh)
-```
-
-An end-to-end example can be found in `python/sglang/bench_one_batch.py`.
-You can run it with the following command:
-```bash
-$ python3 -m sglang.bench_one_batch --correct \
-  --model meta-llama/Meta-Llama-3-8B \
-  --json-model-override-args '{"architectures": ["TorchNativeLlamaForCausalLM"]}' \
-  --tensor-parallel-size 2 \
-  --disable-cuda-graph
-```
-We will enable CUDA Graph support soon.
-"""
+'\nInference-only LLaMA model compatible with HuggingFace weights.\n\nThis model supports tensor parallelism (TP) using the PyTorch tensor parallel package.\nReference: [external reference omitted]\n\nHere is a quick example to enable TP:\n```python\nfrom sglang.srt.layers.model_parallel import tensor_parallel\n\ndevice_mesh = torch.distributed.init_device_mesh("cuda", (tp_size,))\ntensor_parallel(model, device_mesh)\n```\n\nAn end-to-end example can be found in `python/sglang/bench_one_batch.py`.\nYou can run it with the following command:\n```bash\n$ python3 -m sglang.bench_one_batch --correct   --model meta-llama/Meta-Llama-3-8B   --json-model-override-args \'{"architectures": ["TorchNativeLlamaForCausalLM"]}\'   --tensor-parallel-size 2   --disable-cuda-graph\n```\nWe will enable CUDA Graph support soon.\n'
 
 import types
 from typing import Any, Dict, Iterable, Optional, Tuple

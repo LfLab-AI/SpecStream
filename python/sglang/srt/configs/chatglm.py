@@ -5,7 +5,7 @@
 # ChatGLM2 and ChatGLM3 share the same config.
 # ChatGLM4 is officially supported by Huggingface
 # transformers >= 4.46.0 is required
-# https://huggingface.co/docs/transformers/en/model_doc/glm
+# [external reference omitted]
 from transformers import PretrainedConfig
 
 

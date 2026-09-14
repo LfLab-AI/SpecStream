@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # === export types and functions from cudart to Python ===
 # for the original cudart definition, please check
-# https://docs.nvidia.com/cuda/cuda-runtime-api/index.html
+# [external reference omitted]
 
 cudaError_t = ctypes.c_int
 cudaMemcpyKind = ctypes.c_int
@@ -39,12 +39,7 @@ class Function:
 
 
 def find_loaded_library(lib_name) -> Optional[str]:
-    """
-    According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
-    the file `/proc/self/maps` contains the memory maps of the process, which includes the
-    shared libraries loaded by the process. We can use this file to find the path of the
-    a loaded library.
-    """  # noqa
+    '\n    According to according to [external reference omitted]\n    the file `/proc/self/maps` contains the memory maps of the process, which includes the\n    shared libraries loaded by the process. We can use this file to find the path of the\n    a loaded library.\n    '  # noqa
     found = False
     with open("/proc/self/maps") as f:
         for line in f:

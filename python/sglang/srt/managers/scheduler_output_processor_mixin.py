@@ -462,7 +462,7 @@ class SchedulerOutputProcessorMixin:
                     )
                 if req.grammar is not None:
                     req.grammar.finished = req.finished()
-                # SPECTRE uses the spec-v1 output path, which exits this loop
+                # backend uses the spec-v1 output path, which exits this loop
                 # early.  Pause a remote-Drafter request before that exit once
                 # it has produced the requested horizon; otherwise it remains
                 # in the running batch and decodes until the context limit.

@@ -36,7 +36,7 @@ from sglang.srt.utils import make_layers
 from .granitemoe import GraniteMoeMoE
 
 
-# in vLLM this is in a separate file, but keeping it here for decoupling
+# in backend this is in a separate file, but keeping it here for decoupling
 class GraniteMoeSharedMLP(nn.Module):
     def __init__(
         self,
@@ -665,10 +665,10 @@ class GraniteMoeHybridForCausalLM(
             if _load_quant_expert(n, p):
                 continue
 
-            # Logic analogous to: https://github.com/vllm-project/vllm/blob/f49e5aff11c986ed4d45202b1716c5d74786efa9/vllm/model_executor/models/granitemoeshared.py#L215
+            # Logic analogous to: [external reference omitted]
             # Mapping different experts' layout:
             #  from HF (input_linear, output_linear, router)
-            #  to vLLM (experts_w13({e}.w1, {e}.w2), experts_w3({e}.w3), gate)
+            #  to backend (experts_w13({e}.w1, {e}.w2), experts_w3({e}.w3), gate)
             # The renaming and parameter loading logic is the same for weight
             # and weight_scale tensors so we can reuse them without issues.
             if n.endswith(".block_sparse_moe.input_linear.weight") or n.endswith(

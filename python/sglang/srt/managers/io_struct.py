@@ -1374,7 +1374,7 @@ class InitWeightsSendGroupForRemoteInstanceReqInput(BaseReq):
 
 
 # Now UpdateWeightsFromIPCReqInput and UpdateWeightsFromIPCReqOutput
-# are only used by Checkpoint Engine (https://github.com/MoonshotAI/checkpoint-engine)
+# are only used by Checkpoint Engine ([external reference omitted])
 @dataclass
 class UpdateWeightsFromIPCReqInput(BaseReq):
     # ZMQ socket paths for each device UUID

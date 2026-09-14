@@ -104,7 +104,7 @@ class FlashinferDispatcher(BaseDispatcher):
             * self.ep_size
         )
 
-        # Calculate workspace size. For eagle mode, use the larger workspace size since nextn layer will be unquantized.
+        # Calculate workspace size. For backend mode, use the larger workspace size since nextn layer will be unquantized.
         speculative_algo = SpeculativeAlgorithm.from_string(
             get_global_server_args().speculative_algorithm
         )

@@ -43,7 +43,7 @@ def use_mlx() -> bool:
 # MPS has a 4GB (2^32 bytes) limit for MPSTemporaryNDArray allocations.
 # Metal may allocate multiple temporary buffers internally, so we use a
 # conservative threshold of 1GB to avoid hitting the limit.
-# See: https://github.com/anthropics/vllm-metal/issues/43
+# See: [external reference omitted]
 _MPS_SAFE_SIZE_BYTES = 1 << 30  # 1GB
 
 # MLX to PyTorch dtype mapping
@@ -159,7 +159,7 @@ def mlx_to_torch(
         device = torch.device(device)
 
     # Use memoryview for zero-copy conversion (bypasses numpy for bfloat16)
-    # reference: https://github.com/ml-explore/mlx/issues/403
+    # reference: [external reference omitted]
     torch_dtype = MLX_TO_TORCH_DTYPE.get(array.dtype)
     if torch_dtype is not None:
         if already_contiguous:
@@ -185,7 +185,7 @@ def mlx_to_torch(
             tensor = tensor.to(device)
         else:
             # Large tensor - keep on CPU to avoid MPS 4GB limit crash
-            # See: https://github.com/anthropics/vllm-metal/issues/43
+            # See: [external reference omitted]
             logger.debug(
                 "Tensor too large for MPS (%d bytes > %d limit), keeping on CPU",
                 _get_tensor_size_bytes(array),

@@ -25,7 +25,7 @@ try:
 except ImportError as e:
     raise ImportError(
         "Please install NIXL by following the instructions at "
-        "https://github.com/ai-dynamo/nixl/blob/main/README.md "
+        "[dependency documentation] "
         "to use HiCacheNixl storage backend."
     ) from e
 

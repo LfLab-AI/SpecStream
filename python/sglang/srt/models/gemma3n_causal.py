@@ -986,7 +986,7 @@ class Gemma3nForCausalLM(PreTrainedModel):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # lm_head is not used in vllm as it is tied with embed_token
+                # lm_head is not used in backend as it is tied with embed_token
                 if "lm_head.weight" in name:
                     continue
                 # Skip loading extra bias for GPTQ models

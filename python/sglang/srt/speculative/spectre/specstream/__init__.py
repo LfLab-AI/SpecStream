@@ -1,9 +1,4 @@
-"""SpecStream extensions for the SPECTRE target verifier.
-
-The package is intentionally local to SPECTRE.  It does not modify the
-generic HiCache/offload data path and must never be imported by the remote
-drafter.
-"""
+'SpecStream extensions for the backend target verifier.\n\nThe package is intentionally local to backend.  It does not modify the\ngeneric HiCache/offload data path and must never be imported by the remote\ndrafter.\n'
 
 from sglang.srt.speculative.spectre.specstream.config import SpecStreamConfig
 from sglang.srt.speculative.spectre.specstream.state import TargetTieredKVState

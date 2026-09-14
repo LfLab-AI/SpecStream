@@ -14,7 +14,7 @@
 
 # Modeling from:
 # ./llama.py and
-# https://github.com/huggingface/transformers/blob/main/src/transformers/models/GlmOcr/modular_GlmOcr.py
+# [external reference omitted]
 """Inference-only GLM-OCR model compatible with HuggingFace weights."""
 
 import logging
@@ -308,7 +308,7 @@ class GlmOcrForConditionalGeneration(Glm4vForConditionalGeneration):
         self.logits_processor = LogitsProcessor(config)
         self.pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
 
-        # For EAGLE3 support
+        # For backend support
         self.capture_aux_hidden_states = False
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]], is_nextn=False):

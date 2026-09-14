@@ -119,14 +119,14 @@ if __name__ == "__main__":
         action=argparse.BooleanOptionalAction,
         type=bool,
         default=False,
-        help="Whether to profile memory usage (https://pytorch.org/memory_viz)",
+        help="Whether to profile memory usage ([dependency documentation]",
     )
     parser.add_argument(
         "--rpd",
         action=argparse.BooleanOptionalAction,
         type=bool,
         default=False,
-        help="Whether to use ROCM rpd profiler (https://github.com/ROCm/rocmProfileData)",
+        help="Whether to use ROCM rpd profiler ([dependency documentation]",
     )
     parser.add_argument(
         "--merge-profiles",

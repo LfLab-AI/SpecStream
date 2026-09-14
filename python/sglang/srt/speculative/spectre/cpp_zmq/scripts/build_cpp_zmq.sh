@@ -1,20 +1,13 @@
-#!/bin/bash
-set -euxo pipefail
-
+#!/usr/bin/env bash
+set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ZMQ_HPP_PATH="/usr/include/zmq.hpp"
-pushd "$PROJECT_DIR"
-
-pip install pybind11 msgpack --break-system-packages
-apt-get update && apt-get install -y libmsgpack-dev libzmq3-dev
-
-if [ ! -f "$ZMQ_HPP_PATH" ]; then
-  echo "Missing ${ZMQ_HPP_PATH}. Download zmq.hpp from:" >&2
-  echo "  https://github.com/zeromq/cppzmq/blob/master/zmq.hpp" >&2
-  echo "and place it at ${ZMQ_HPP_PATH} before building spectre_zmq." >&2
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+PYTHON="${PYTHON:-python}"
+INCLUDE_DIR="${ZMQ_INCLUDE_DIR:-/usr/include}"
+"$PYTHON" -c 'import pybind11; import setuptools'
+if [[ ! -f "$INCLUDE_DIR/zmq.hpp" ]]; then
+  echo "Missing cppzmq header: $INCLUDE_DIR/zmq.hpp. Install cppzmq-dev or set ZMQ_INCLUDE_DIR." >&2
   exit 1
 fi
-
-python3 setup.py build_ext --inplace --force
-popd
+cd "$PROJECT_DIR"
+"$PYTHON" setup.py build_ext --inplace --force

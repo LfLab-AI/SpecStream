@@ -1013,7 +1013,7 @@ def act_and_mul_triton(
     )
 
 
-# _moe_sum_reduce_kernel kernel modified from https://github.com/ModelTC/lightllm/blob/main/lightllm/common/fused_moe/moe_sum_reduce.py
+# _moe_sum_reduce_kernel kernel modified from [external reference omitted]
 @triton.jit
 def _moe_sum_reduce_kernel(
     input_ptr,

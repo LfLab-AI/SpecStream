@@ -97,7 +97,7 @@ class GLMAttention(nn.Module):
             prefix=add_prefix("dense", prefix),
         )
 
-        # https://huggingface.co/THUDM/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
+        # [external reference omitted]
         rope_ratio = getattr(config, "rope_ratio", 1.0)
         max_positions = getattr(config, "seq_length", 8192)
         self.rotary_emb = get_rope(

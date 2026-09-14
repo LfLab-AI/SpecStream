@@ -91,7 +91,7 @@ def get_moe_configs(
             # This is because the tuning environment might differ from your current environment.
             # For example, updating the Triton version might cause all old configs to become suboptimal.
             # To achieve the best performance, consider re-tuning the Triton fused MOE kernel in your environment.
-            # For the tuning method, refer to: https://github.com/sgl-project/sglang/tree/main/benchmark/kernels/fused_moe_triton
+            # For the tuning method, refer to: [external reference omitted]
             logger.info(f"Using MoE kernel config from {config_file_path}.")
             # If a configuration has been found, return it
             return {int(key): val for key, val in json.load(f).items()}
@@ -120,7 +120,7 @@ def get_moe_configs(
         logger.warning(
             (
                 "Using MoE kernel config with down_moe=False. Performance might be sub-optimal! "
-                "Config file not found at %s, you can create them with https://github.com/sgl-project/sglang/tree/main/benchmark/kernels/fused_moe_triton"
+                "Config file not found at %s, you can create them with [dependency documentation]"
             ),
             config_file_path,
         )
@@ -128,7 +128,7 @@ def get_moe_configs(
         logger.warning(
             (
                 "Using default MoE kernel config. Performance might be sub-optimal! "
-                "Config file not found at %s, you can create them with https://github.com/sgl-project/sglang/tree/main/benchmark/kernels/fused_moe_triton"
+                "Config file not found at %s, you can create them with [dependency documentation]"
             ),
             config_file_path,
         )

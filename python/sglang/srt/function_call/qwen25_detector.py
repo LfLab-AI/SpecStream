@@ -15,20 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class Qwen25Detector(BaseFormatDetector):
-    """
-    Detector for Qwen 2.5 and Qwen 3 model function call format.
-
-    Format Structure:
-    ```
-    <tool_call>\n{"name":"func1", "arguments":{...}}\n</tool_call>\n<tool_call>\n{"name":"func2", "arguments":{...}}\n</tool_call>
-    ```
-
-    Key Components:
-    - Tool Call Tags: `<tool_call>` and `</tool_call>` wrap each individual call
-    - Function Call Object: JSON object with "name" and "arguments" fields
-
-    Reference: https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct?chat_template=default
-    """
+    '\n    Detector for Qwen 2.5 and Qwen 3 model function call format.\n\n    Format Structure:\n    ```\n    <tool_call>\n{"name":"func1", "arguments":{...}}\n</tool_call>\n<tool_call>\n{"name":"func2", "arguments":{...}}\n</tool_call>\n    ```\n\n    Key Components:\n    - Tool Call Tags: `<tool_call>` and `</tool_call>` wrap each individual call\n    - Function Call Object: JSON object with "name" and "arguments" fields\n\n    Reference: [external reference omitted]\n    '
 
     def __init__(self):
         """

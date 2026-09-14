@@ -1152,7 +1152,7 @@ class TRTLLMMLABackend(FlashInferMLAAttnBackend):
 
 
 class TRTLLMMLAMultiStepDraftBackend(FlashInferMLAMultiStepDraftBackend):
-    """Multi-step draft backend for TRT-LLM MLA used by EAGLE."""
+    'Multi-step draft backend for TRT-LLM MLA used by backend.'
 
     def __init__(
         self, model_runner: "ModelRunner", topk: int, speculative_num_steps: int

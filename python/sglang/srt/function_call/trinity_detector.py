@@ -9,14 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class TrinityDetector(Qwen25Detector):
-    """
-    Detector for Trinity models using Qwen-style function call format.
-
-    This detector extends Qwen25Detector to handle tool calls that may appear
-    inside <think> sections by stripping the think tags before parsing.
-
-    Reference: https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct?chat_template=default
-    """
+    '\n    Detector for Trinity models using Qwen-style function call format.\n\n    This detector extends Qwen25Detector to handle tool calls that may appear\n    inside <think> sections by stripping the think tags before parsing.\n\n    Reference: [external reference omitted]\n    '
 
     def _strip_think_tags(self, text: str) -> str:
         """Remove <think> and </think> tags, keeping the content inside."""

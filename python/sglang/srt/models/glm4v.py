@@ -14,7 +14,7 @@
 
 # Modeling from:
 # ./llama.py and
-# https://github.com/huggingface/transformers/blob/main/src/transformers/models/glm4v/modular_glm4v.py
+# [external reference omitted]
 """Inference-only GLM-4.1V model compatible with HuggingFace weights."""
 
 import logging
@@ -587,7 +587,7 @@ class Glm4vForConditionalGeneration(nn.Module):
         self.logits_processor = LogitsProcessor(config)
         self.pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
 
-        # For EAGLE3 support
+        # For backend support
         self.capture_aux_hidden_states = False
 
     def pad_input_ids(self, input_ids: List[int], mm_inputs: MultimodalInputs):

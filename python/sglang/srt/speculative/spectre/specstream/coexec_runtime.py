@@ -86,7 +86,7 @@ class TargetGrantRuntime:
     ) -> None:
         if desired_q < 1:
             raise ValueError("desired_q must be positive")
-        # A request has only one live SPECTRE round.  Retaining every completed
+        # A request has only one live backend round.  Retaining every completed
         # spec_cnt until terminal request release grows without bound on long
         # generations and leaves stale states available to late messages.
         for key in [
@@ -154,7 +154,7 @@ class TargetGrantRuntime:
         )
         if not target_waiting and reserve_complete_horizon:
             # A non-H2D fixed window may reserve the complete next-round
-            # SPECTRE sequence.  A current history-H2D observation is a single
+            # backend sequence.  A current history-H2D observation is a single
             # physical transfer window: admit one token, then query the same
             # or a later CUDA-event window again after its ACK.
             # Re-evaluate after each ACK using the remaining absolute window.
@@ -176,7 +176,7 @@ class TargetGrantRuntime:
         if decision.state is GrantState.SLACK_FILL and effective_deadline_us is None:
             # A measured grant's deadline is the latest safe *launch* time,
             # not the end of the predicted window.  This lets ACK-driven
-            # one-token grants pipeline the next SPECTRE candidate sequence
+            # one-token grants pipeline the next backend candidate sequence
             # while Target verifies the current sequence, without restarting
             # the slack budget after every ACK.
             draft_step_ms = decision.draft_step_ms

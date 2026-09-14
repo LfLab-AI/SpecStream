@@ -1,9 +1,4 @@
-"""
-Ollama-compatible API protocol definitions.
-
-These models match the Ollama API format:
-https://github.com/ollama/ollama/blob/main/docs/api.md
-"""
+'\nOllama-compatible API protocol definitions.\n\nThese models match the Ollama API format:\n[external reference omitted]\n'
 
 from typing import Any, Dict, List, Literal, Optional, Union
 

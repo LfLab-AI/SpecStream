@@ -10,7 +10,7 @@ import pytest
 
 SCRIPT = (
     Path(__file__).resolve().parents[4]
-    / "scripts/specstream/paper_eval/qwen3/analyze_grant_events.py"
+    / "scripts/specstream/analyze_grant_events.py"
 )
 spec = importlib.util.spec_from_file_location("specstream_grant_event_audit", SCRIPT)
 audit = importlib.util.module_from_spec(spec)

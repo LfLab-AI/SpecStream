@@ -68,7 +68,7 @@ class LogitsProcessorOutput:
     # The logits of the next tokens.       shape: [#seq, vocab_size]
     # Can be None for certain prefill-only requests (e.g., multi-item scoring) that don't need next token generation
     next_token_logits: Optional[torch.Tensor]
-    # Used by speculative decoding (EAGLE)
+    # Used by speculative decoding (backend)
     # The last hidden layers
     hidden_states: Optional[torch.Tensor] = None
 

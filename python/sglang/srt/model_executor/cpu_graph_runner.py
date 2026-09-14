@@ -860,5 +860,5 @@ CPU_GRAPH_CAPTURE_FAILED_MSG = (
     "1. set --mem-fraction-static to a smaller value (e.g., 0.8 or 0.7)\n"
     "2. set --torch-compile-max-bs to a smaller value (e.g., 8)\n"
     "3. disable torch compile by not using --enable-torch-compile\n"
-    "Open an issue on GitHub https://github.com/sgl-project/sglang/issues/new/choose \n"
+    "Open an issue on GitHub [dependency documentation] \n"
 )

@@ -373,7 +373,7 @@ class NPUFusedMLAPreprocess(torch.nn.Module):
                 num_blocks, num_heads * self.qk_rope_head_dim // 16, block_size, 16
             )
         # TODO: dummy inputs to be removed
-        # https://github.com/sgl-project/sgl-kernel-npu/issues/78
+        # [external reference omitted]
         if hasattr(self.q_a_layernorm, "bias"):
             q_a_layernorm_bias = self.q_a_layernorm.bias
         else:

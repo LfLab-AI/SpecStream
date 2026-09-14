@@ -75,11 +75,7 @@ def copy_with_check(target: torch.Tensor, loaded_weight: torch.Tensor):
 
 
 class BasevLLMParameter(Parameter):
-    """
-    Base parameter for vLLM linear layers. Extends the torch.nn.parameter
-    by taking in a linear weight loader. Will copy the loaded weight
-    into the parameter when the provided weight loader is called.
-    """
+    '\n    Base parameter for backend linear layers. Extends the torch.nn.parameter\n    by taking in a linear weight loader. Will copy the loaded weight\n    into the parameter when the provided weight loader is called.\n    '
 
     def __new__(cls, data: torch.Tensor, **kwargs):
 

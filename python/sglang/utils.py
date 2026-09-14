@@ -342,7 +342,7 @@ def encode_video_base64(video_path: str, num_frames: int = 16):
 def _is_chinese_char(cp: int):
     """Checks whether CP is the codepoint of a CJK character."""
     # This defines a "chinese character" as anything in the CJK Unicode block:
-    #   https://en.wikipedia.org/wiki/CJK_Unified_Ideographs_(Unicode_block)
+    #   [external reference omitted])
     #
     # Note that the CJK Unicode block is NOT all Japanese and Korean characters,
     # despite its name. The modern Korean Hangul alphabet is a different block,
@@ -366,7 +366,7 @@ def _is_chinese_char(cp: int):
 
 def find_printable_text(text: str):
     """Returns the longest printable substring of text that contains only entire words."""
-    # Borrowed from https://github.com/huggingface/transformers/blob/061580c82c2db1de9139528243e105953793f7a2/src/transformers/generation/streamers.py#L99
+    # Borrowed from [external reference omitted]
 
     # After the symbol for a new line, we flush the cache.
     if text.endswith("\n"):

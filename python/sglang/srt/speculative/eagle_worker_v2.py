@@ -199,8 +199,8 @@ class EagleDraftWorker(BaseDraftWorker):
     def init_lm_head(self):
         embed, head = self.target_worker.model_runner.model.get_embed_and_head()
         if self.speculative_algorithm.is_eagle3():
-            # most cases EAGLE3 models don't share lm_head
-            # but some models (e.g. nvidia/gpt-oss-120b-Eagle3) shares
+            # most cases backend models don't share lm_head
+            # but some models (e.g. nvidia/gpt-oss-120b-backend) shares
             if (
                 hasattr(self.draft_runner.model, "load_lm_head_from_target")
                 and self.draft_runner.model.load_lm_head_from_target

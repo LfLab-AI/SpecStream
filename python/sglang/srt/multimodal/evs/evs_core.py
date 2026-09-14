@@ -95,7 +95,7 @@ def compute_retention_mask(
     return mask
 
 
-# ▲ End of VLLM code
+# ▲ End of backend code
 
 
 def tokens_per_frame(

@@ -345,42 +345,7 @@ class Gemma3ForConditionalGeneration(PreTrainedModel):
         input_embeds: torch.Tensor = None,
         **kwargs: object,
     ) -> LogitsProcessor:
-        r"""
-            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-                config.text_config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.text_config.vocab_size]`.
-
-            logits_to_keep (`int` or `torch.Tensor`, *optional*):
-                If an `int`, compute logits for the last `logits_to_keep` tokens. If `0`, calculate logits for all
-                `input_ids` (special case). Only last token logits are needed for generation, and calculating them only for that
-                token can save memory, which becomes pretty significant for long sequences or large vocabulary size.
-                If a `torch.Tensor`, must be 1D corresponding to the indices to keep in the sequence length dimension.
-                This is useful when using packed tensor format (single dimension for batch and sequence length).
-
-        Returns:
-
-        Example:
-
-        ```python
-        >>> from PIL import Image
-        >>> import requests
-        >>> from transformers import AutoProcessor, Gemma3ForConditionalGeneration
-
-        >>> model = Gemma3ForConditionalGeneration.from_pretrained("google/Gemma3-test-224px-hf")
-        >>> processor = AutoProcessor.from_pretrained("google/Gemma3-test-224px-hf")
-
-        >>> prompt = "answer en Where is the cow standing?"
-        >>> url = "https://huggingface.co/gv-hf/Gemma3-test-224px-hf/resolve/main/cow_beach_1.png"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
-
-        >>> inputs = processor(images=image, text=prompt,  return_tensors="pt")
-
-        >>> # Generate
-        >>> generate_ids = model.generate(**inputs, max_length=30)
-        >>> processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        "answer en Where is the cow standing?\nbeach"
-        ```"""
+        '\n            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):\n                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,\n                config.text_config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored\n                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.text_config.vocab_size]`.\n\n            logits_to_keep (`int` or `torch.Tensor`, *optional*):\n                If an `int`, compute logits for the last `logits_to_keep` tokens. If `0`, calculate logits for all\n                `input_ids` (special case). Only last token logits are needed for generation, and calculating them only for that\n                token can save memory, which becomes pretty significant for long sequences or large vocabulary size.\n                If a `torch.Tensor`, must be 1D corresponding to the indices to keep in the sequence length dimension.\n                This is useful when using packed tensor format (single dimension for batch and sequence length).\n\n        Returns:\n\n        Example:\n\n        ```python\n        >>> from PIL import Image\n        >>> import requests\n        >>> from transformers import AutoProcessor, Gemma3ForConditionalGeneration\n\n        >>> model = Gemma3ForConditionalGeneration.from_pretrained("google/Gemma3-test-224px-hf")\n        >>> processor = AutoProcessor.from_pretrained("google/Gemma3-test-224px-hf")\n\n        >>> prompt = "answer en Where is the cow standing?"\n        >>> url = "[external reference omitted]"\n        >>> image = Image.open(requests.get(url, stream=True).raw)\n\n        >>> inputs = processor(images=image, text=prompt,  return_tensors="pt")\n\n        >>> # Generate\n        >>> generate_ids = model.generate(**inputs, max_length=30)\n        >>> processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]\n        "answer en Where is the cow standing?\\nbeach"\n        ```'
 
         # Important: position_ids in Gemma3 are 1-indexed
         # This really does cost me sometime
@@ -394,7 +359,7 @@ class Gemma3ForConditionalGeneration(PreTrainedModel):
         else:
             llm_input_ids = input_ids
 
-        # NOTE: As described in https://huggingface.co/blog/gemma3#multimodality, in the prefill stage of Gemma-3, image tokens use bidirectional attention. Currently, only the TritonAttnBackend supports bidirectional attention; other backends have not yet implemented this. Bidirectional attention is incompatible with CUDA Graph and chunked prefill.
+        # NOTE: As described in [external reference omitted] in the prefill stage of Gemma-3, image tokens use bidirectional attention. Currently, only the TritonAttnBackend supports bidirectional attention; other backends have not yet implemented this. Bidirectional attention is incompatible with CUDA Graph and chunked prefill.
         if (
             forward_batch.forward_mode
             == ForwardMode.EXTEND  # only Extend mode is supported for now

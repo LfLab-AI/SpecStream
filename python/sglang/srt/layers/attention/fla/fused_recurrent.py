@@ -547,9 +547,9 @@ def fused_recurrent_gated_delta_rule(
     return o, final_state
 
 
-# HAS_EAGLE_TREE_CUSTOM_ATTN_MASK is added to support eagle tree attention mask
+# HAS_EAGLE_TREE_CUSTOM_ATTN_MASK is added to support backend tree attention mask
 # retrieve_parent_token_ptr: [N, NP2_T], retrieve_next_sibling_ptr: [N, NP2_T]
-# e.g. for a sequence of length 4, the eagle tree attention structure is:
+# e.g. for a sequence of length 4, the backend tree attention structure is:
 # retrieve_next_token=[1, 3, -1, -1] -> retrieve_next_token[i]: the 1st child token of token i
 # retrieve_next_sibling=[-1, 2, -1, -1] -> retrieve_next_sibling[i]: the 1st tree sibling token of token i
 # retrieve_parent_token=[n/a, 0, 0, 1] -> retrieve_parent_token[i]: the parent token of token i

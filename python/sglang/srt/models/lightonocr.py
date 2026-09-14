@@ -12,24 +12,7 @@
 # limitations under the License.
 # ==============================================================================
 
-"""
-Support for lightonai/LightOnOCR-2-1B.
-
-LightOnOCR is a vision-language OCR model that combines:
-- Pixtral vision encoder (24 layers, 1024 hidden dim)
-- Spatial merge projection with RMSNorm + PatchMerger (2x2 = 4x token reduction)
-- Qwen3 language decoder (28 layers, 1024 hidden dim)
-
-Key differences from PixtralForConditionalGeneration:
-- Uses Qwen3ForCausalLM instead of MistralLarge3ForCausalLM as the language model
-- Has an RMSNorm applied to vision encoder output before patch merging
-- Does not use image break/end tokens (single contiguous image token range)
-- HuggingFace checkpoint uses a vision_projection namespace for norm, patch_merger,
-  and adapter weights
-
-References:
-- https://huggingface.co/lightonai/LightOnOCR-2-1B
-"""
+'\nSupport for lightonai/LightOnOCR-2-1B.\n\nLightOnOCR is a vision-language OCR model that combines:\n- Pixtral vision encoder (24 layers, 1024 hidden dim)\n- Spatial merge projection with RMSNorm + PatchMerger (2x2 = 4x token reduction)\n- Qwen3 language decoder (28 layers, 1024 hidden dim)\n\nKey differences from PixtralForConditionalGeneration:\n- Uses Qwen3ForCausalLM instead of MistralLarge3ForCausalLM as the language model\n- Has an RMSNorm applied to vision encoder output before patch merging\n- Does not use image break/end tokens (single contiguous image token range)\n- HuggingFace checkpoint uses a vision_projection namespace for norm, patch_merger,\n  and adapter weights\n\nReferences:\n- [external reference omitted]\n'
 
 from dataclasses import fields
 from typing import Iterable, List, Tuple

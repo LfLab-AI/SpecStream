@@ -629,7 +629,7 @@ async def get_load():
 
 
 # example usage:
-# curl -s -X POST http://localhost:30000/set_internal_state -H "Content-Type: application/json" -d '{"server_args": {"pp_max_micro_batch_size": 8}}'
+# curl -s -X POST [external reference omitted] -H "Content-Type: application/json" -d '{"server_args": {"pp_max_micro_batch_size": 8}}'
 @app.api_route("/set_internal_state", methods=["POST", "PUT"])
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def set_internal_state(obj: SetInternalStateReq, request: Request):
@@ -806,7 +806,7 @@ async def clear_hicache_storage_backend_deprecated():
 
 
 # example usage:
-# curl -s -X POST http://127.0.0.1:30000/clear_hicache_storage_backend
+# curl -s -X POST [external reference omitted]
 @app.api_route("/hicache/storage-backend/clear", methods=["POST"])
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def clear_hicache_storage_backend():
@@ -819,7 +819,7 @@ async def clear_hicache_storage_backend():
 
 
 # example usage:
-# curl -s -X PUT http://127.0.0.1:30000/hicache/storage-backend \
+# curl -s -X PUT [external reference omitted] \
 #  -H 'Content-Type: application/json' \
 #   -d '{
 #     "hicache_storage_backend": "file",
@@ -858,7 +858,7 @@ async def attach_hicache_storage_backend(obj: AttachHiCacheStorageReqInput):
 
 
 # example usage:
-# curl -s -X DELETE http://127.0.0.1:30000/hicache/storage-backend
+# curl -s -X DELETE [external reference omitted]
 @app.api_route("/hicache/storage-backend", methods=["DELETE"])
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def detach_hicache_storage_backend():
@@ -885,7 +885,7 @@ async def detach_hicache_storage_backend():
 
 
 # example usage:
-# curl -s http://127.0.0.1:30000/hicache/storage-backend
+# curl -s [external reference omitted]
 @app.get("/hicache/storage-backend")
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def hicache_storage_backend_status():

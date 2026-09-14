@@ -164,16 +164,7 @@ def get_rope_config(config):
 
 
 def _patch_text_config(parent_config: PretrainedConfig, text_config):
-    """Synchronize standard attributes between parent config and text sub-config.
-
-    In transformers v5, the "untangle config" refactor removed automatic
-    inheritance of top-level PretrainedConfig attributes (pad_token_id,
-    tie_word_embeddings, etc.) from sub-configs. Downstream code expects
-    these attributes to be present on both configs (some models pass the
-    parent directly to the language model, others pass the text sub-config),
-    so we propagate in both directions when an attribute is missing.
-    (See https://github.com/huggingface/transformers/pull/41541)
-    """
+    'Synchronize standard attributes between parent config and text sub-config.\n\n    In transformers v5, the "untangle config" refactor removed automatic\n    inheritance of top-level PretrainedConfig attributes (pad_token_id,\n    tie_word_embeddings, etc.) from sub-configs. Downstream code expects\n    these attributes to be present on both configs (some models pass the\n    parent directly to the language model, others pass the text sub-config),\n    so we propagate in both directions when an attribute is missing.\n    (See [external reference omitted])\n    '
     _ATTRS_TO_PROPAGATE = [
         "pad_token_id",
         "bos_token_id",
@@ -331,7 +322,7 @@ def _is_deepseek_ocr2_model(config: PretrainedConfig) -> bool:
 
 def _override_deepseek_ocr_v_head_dim(config: DeepseekVLV2Config) -> None:
     # FIXME: deepseek-ocr's v_head_dim is set to 0 in its config file.
-    # https://huggingface.co/deepseek-ai/DeepSeek-OCR/blob/main/config.json#L116
+    # [external reference omitted]
     if config.text_config.v_head_dim == 0:
         V_HEAD_DIM_PATCH = 128
         config.text_config.v_head_dim = V_HEAD_DIM_PATCH
@@ -552,7 +543,7 @@ def get_config(
         and config.architectures[0] == "Phi4MMForCausalLM"
     ):
         # Phi4MMForCausalLM uses a hard-coded vision_config. See:
-        # https://github.com/vllm-project/vllm/blob/6071e989df1531b59ef35568f83f7351afb0b51e/vllm/model_executor/models/phi4mm.py#L71
+        # [external reference omitted]
         # We set it here to support cases where num_attention_heads is not divisible by the TP size.
         from transformers import SiglipVisionConfig
 
@@ -736,7 +727,7 @@ def get_context_length(config):
 _FAST_LLAMA_TOKENIZER = "hf-internal-testing/llama-tokenizer"
 
 
-# Filter warnings like: https://github.com/sgl-project/sglang/issues/8082
+# Filter warnings like: [external reference omitted]
 class TokenizerWarningsFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         return "Calling super().encode with" not in record.getMessage()
@@ -1078,10 +1069,7 @@ def _fix_v5_add_bos_eos_token(tokenizer, model_name_or_path, revision=None):
 
 
 def _fix_special_tokens_pattern(tokenizer):
-    """Fix https://github.com/huggingface/transformers/pull/42563 which defaults
-    special_tokens_pattern to "cls_sep", inserting None into token IDs when
-    cls_token/sep_token are undefined (e.g. Kimi-VL's TikTokenTokenizer).
-    """
+    'Fix [external reference omitted] which defaults\n    special_tokens_pattern to "cls_sep", inserting None into token IDs when\n    cls_token/sep_token are undefined (e.g. Kimi-VL\'s TikTokenTokenizer).\n    '
     pattern = getattr(tokenizer, "special_tokens_pattern", None)
     if pattern == "cls_sep" and (
         tokenizer.cls_token_id is None or tokenizer.sep_token_id is None

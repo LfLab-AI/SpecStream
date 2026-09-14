@@ -218,7 +218,7 @@ class DeepseekV3ForCausalLMNextN(DeepseekV3ForCausalLM):
 
     # Support amd/DeepSeek-R1-0528-MXFP4 renaming: model.layers.61*.
     # Ref: HF config.json for amd/DeepSeek-R1-0528-MXFP4
-    # https://huggingface.co/amd/DeepSeek-R1-0528-MXFP4/blob/main/config.json
+    # [external reference omitted]
     hf_to_sglang_mapper = WeightsMapper(
         orig_to_new_substr={
             "model.layers.61": "model.decoder",

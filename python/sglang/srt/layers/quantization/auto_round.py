@@ -20,9 +20,7 @@ _is_npu = is_npu()
 
 
 class AutoRoundConfig(QuantizationConfig):
-    """Config class for AutoRound.
-    Reference: https://arxiv.org/pdf/2309.05516
-    """
+    'Config class for AutoRound.\n    Reference: [external reference omitted]\n    '
 
     SUPPORTED_BITS = {2, 3, 4, 8}
     SUPPORTED_DTYPES = {"int"}

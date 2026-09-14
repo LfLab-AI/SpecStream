@@ -151,7 +151,7 @@ def weight_loader_with_alias(alias: str):
             prefix: str = None,
             **kwargs,
         ):
-            # pf = "[vLLM][load]" + " " if prefix is None else f"[{prefix}] "
+            # pf = "[backend][load]" + " " if prefix is None else f"[{prefix}] "
             value = func(param, loaded_weight, *args, **kwargs)
             return value
 

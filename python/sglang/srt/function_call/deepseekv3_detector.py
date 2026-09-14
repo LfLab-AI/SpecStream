@@ -17,30 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class DeepSeekV3Detector(BaseFormatDetector):
-    """
-    Detector for DeepSeek V3 model function call format.
-
-    The DeepSeek V3 format uses special Unicode tokens to delimit function calls
-    with JSON code blocks for arguments.
-
-    Format Structure:
-    ```
-    <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>{function_name}\n```json\n{json_arguments}\n```<｜tool▁calls▁end｜><｜end▁of▁sentence｜>
-    ```
-    Examples:
-    ```
-    <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather\n```json\n{"location": "Tokyo"}\n```<｜tool▁call▁end｜>\n<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather\n```json\n{"location": "Paris"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>
-    ```
-
-    Key Components:
-    - Tool Calls Section: Wrapped between `<｜tool▁calls▁begin｜>` and `<｜tool▁calls▁end｜>`
-    - Individual Tool Call: Wrapped between `<｜tool▁call▁begin｜>` and `<｜tool▁call▁end｜>`
-    - Function Declaration: `function<｜tool▁sep｜>{function_name}`
-    - Arguments: JSON code block between ````json` and ````
-    - Supports multiple tool calls
-
-    Reference: https://huggingface.co/deepseek-ai/DeepSeek-V3-0324?chat_template=default
-    """
+    '\n    Detector for DeepSeek V3 model function call format.\n\n    The DeepSeek V3 format uses special Unicode tokens to delimit function calls\n    with JSON code blocks for arguments.\n\n    Format Structure:\n    ```\n    <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>{function_name}\n```json\n{json_arguments}\n```<｜tool▁calls▁end｜><｜end▁of▁sentence｜>\n    ```\n    Examples:\n    ```\n    <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather\n```json\n{"location": "Tokyo"}\n```<｜tool▁call▁end｜>\n<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_current_weather\n```json\n{"location": "Paris"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜end▁of▁sentence｜>\n    ```\n\n    Key Components:\n    - Tool Calls Section: Wrapped between `<｜tool▁calls▁begin｜>` and `<｜tool▁calls▁end｜>`\n    - Individual Tool Call: Wrapped between `<｜tool▁call▁begin｜>` and `<｜tool▁call▁end｜>`\n    - Function Declaration: `function<｜tool▁sep｜>{function_name}`\n    - Arguments: JSON code block between ````json` and ````\n    - Supports multiple tool calls\n\n    Reference: [external reference omitted]\n    '
 
     def __init__(self):
         super().__init__()

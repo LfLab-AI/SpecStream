@@ -28,14 +28,7 @@ QoQ_SUPPORTED_GROUP_SIZES = [-1, 128]
 
 
 class QoQConfig(QuantizationConfig):
-    """Config class for QoQ Quantization.
-
-    - Weight: static, per-channel/group, asymmetric
-    - Activation: dynamic, per-token, symmetric
-
-    Reference: https://arxiv.org/abs/2405.04532
-    https://github.com/mit-han-lab/omniserve
-    """
+    'Config class for QoQ Quantization.\n\n    - Weight: static, per-channel/group, asymmetric\n    - Activation: dynamic, per-token, symmetric\n\n    Reference: [external reference omitted]\n    [external reference omitted]\n    '
 
     def __init__(self, weight_bits: int, group_size: int) -> None:
         self.weight_bits = weight_bits

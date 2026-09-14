@@ -296,7 +296,7 @@ class Gemma2Model(nn.Module):
         # Normalize the embedding by sqrt(hidden_size)
         # The normalizer's data type should be downcasted to the model's
         # data type such as bfloat16, not float32.
-        # See https://github.com/huggingface/transformers/pull/29402
+        # See [external reference omitted]
         normalizer = self.config.hidden_size**0.5
         self.register_buffer("normalizer", torch.tensor(normalizer))
 
@@ -478,7 +478,7 @@ class Gemma2ForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # lm_head is not used in vllm as it is tied with embed_token.
+                # lm_head is not used in backend as it is tied with embed_token.
                 # To prevent errors, skip loading lm_head.weight.
                 if "lm_head.weight" in name:
                     continue

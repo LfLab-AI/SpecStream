@@ -100,10 +100,7 @@ def adaptive_enc_mask(x_len, chunk_start_idx, left_window=0, right_window=0):
 
 
 class Swish(nn.Module):
-    """Implement Swish activation module.
-    From https://arxiv.org/pdf/2005.03191.pdf
-
-    """
+    'Implement Swish activation module.\n    From [external reference omitted]\n\n    '
 
     def __init__(self) -> None:
         super().__init__()
@@ -154,30 +151,7 @@ class GLU(nn.Module):
 
 # TODO: Abdel, this can be improved using GLU module
 class GLUPointWiseConv(nn.Module):
-    """GLUPointWiseConv module
-    used for conformer architecture,
-    for more details see:
-    https://arxiv.org/pdf/2005.08100v1.pdf
-
-    Args:
-        input_dim: int
-            input channel size.
-        output_dim: int
-            output channel size.
-        kernel_size: int
-            kernel size
-        glu_type: str, optional
-            activation function one of
-             ["sigmoid", "relu", "gelu"]
-              default "sigmoid".
-        bias_in_glu: bool, optional
-            use addtive bias in glu
-        causal: bool, optional
-            if set to True, padding is set to the half of
-             kernel size, ie, convolution can't see future frames.
-              default False.
-
-    """
+    'GLUPointWiseConv module\n    used for conformer architecture,\n    for more details see:\n    [external reference omitted]\n\n    Args:\n        input_dim: int\n            input channel size.\n        output_dim: int\n            output channel size.\n        kernel_size: int\n            kernel size\n        glu_type: str, optional\n            activation function one of\n             ["sigmoid", "relu", "gelu"]\n              default "sigmoid".\n        bias_in_glu: bool, optional\n            use addtive bias in glu\n        causal: bool, optional\n            if set to True, padding is set to the half of\n             kernel size, ie, convolution can\'t see future frames.\n              default False.\n\n    '
 
     def __init__(
         self,
@@ -260,28 +234,7 @@ class GLUPointWiseConv(nn.Module):
 
 
 class DepthWiseSeperableConv1d(nn.Module):
-    """DepthWiseSeperableConv1d module used in Convnet module
-    for the conformer, for more details see:
-    https://arxiv.org/pdf/2005.08100v1.pdf
-
-    Args:
-        input_dim: int
-            input channel size.
-        depthwise_seperable_out_channel: int
-            if set different to 0, the number of
-             depthwise_seperable_out_channel will be used as a channel_out
-             of the second conv1d layer.
-             otherwise, it equal to 0, the second conv1d layer is skipped.
-        kernel_size: int
-            kernel_size
-        depthwise_multiplier: int
-            number of input_dim channels duplication. this value
-            will be used to compute the hidden channels of the Conv1D.
-        padding: int, optional
-            padding for the conv1d,
-             default: 0.
-
-    """
+    'DepthWiseSeperableConv1d module used in Convnet module\n    for the conformer, for more details see:\n    [external reference omitted]\n\n    Args:\n        input_dim: int\n            input channel size.\n        depthwise_seperable_out_channel: int\n            if set different to 0, the number of\n             depthwise_seperable_out_channel will be used as a channel_out\n             of the second conv1d layer.\n             otherwise, it equal to 0, the second conv1d layer is skipped.\n        kernel_size: int\n            kernel_size\n        depthwise_multiplier: int\n            number of input_dim channels duplication. this value\n            will be used to compute the hidden channels of the Conv1D.\n        padding: int, optional\n            padding for the conv1d,\n             default: 0.\n\n    '
 
     def __init__(
         self,
@@ -328,63 +281,7 @@ class DepthWiseSeperableConv1d(nn.Module):
 
 
 class ConvModule(nn.Module):
-    """ConvModule Module for the conformer block.
-    for more details see:
-    https://arxiv.org/pdf/2005.08100v1.pdf
-
-    Args:
-        input_dim: int
-            input channel size.
-        ext_pw_out_channel: int
-            if > 0, ext_pw_out_channel is a dim channel size
-             for the last pointwise conv after swish activation.
-        depthwise_seperable_out_channel: int
-            if set different to 0, the number of
-             depthwise_seperable_out_channel
-             will be used as a channel_out of the second conv1d layer.
-             otherwise, it equal to 0, the second conv1d layer is skipped.
-        ext_pw_kernel_size: int
-            kernel size of the conv pointwise of the conformer.
-        kernel_size: int
-            kernel size.
-        depthwise_multiplier: int
-            number of input_dim channels duplication. this value
-             will be used to compute the hidden channels of the Conv1D.
-        dropout_rate: float
-            dropout rate.
-        causal: bool, optional
-            if set to True, convolution have no access
-             to future frames. default False.
-        batch_norm: bool, optional
-            if set to True, apply batchnorm before activation.
-            default False
-        chunk_se: int, optional
-            0 for offline SE.
-            1 for streaming SE, where mean is computed
-             by accumulated history until current chunk_se.
-            2 for streaming SE, where mean is computed
-             by only the current chunk.
-        chunk_size: int, optional
-            chunk size for cnn. default 18
-        activation: str, optional
-            activation function used in ConvModule,
-            default: "relu".
-        glu_type: str, optional
-            activation function used for the glu,
-            default: "sigmoid".
-        bias_in_glu: bool, optional
-            if set to True, use additive bias in the weight module
-             before GLU.
-        linear_glu_in_convm: bool, optional
-            if set to True, use GLULinear module,
-             otherwise, used GLUPointWiseConv module.
-              default to False.
-        export: bool, optional,
-            if set to True, padding is equal to 0.  This is for inference,
-             or onnx export.  Typically this is set by the export program or
-             the decoder program, and it isn't present in your config file.
-             default False
-    """
+    'ConvModule Module for the conformer block.\n    for more details see:\n    [external reference omitted]\n\n    Args:\n        input_dim: int\n            input channel size.\n        ext_pw_out_channel: int\n            if > 0, ext_pw_out_channel is a dim channel size\n             for the last pointwise conv after swish activation.\n        depthwise_seperable_out_channel: int\n            if set different to 0, the number of\n             depthwise_seperable_out_channel\n             will be used as a channel_out of the second conv1d layer.\n             otherwise, it equal to 0, the second conv1d layer is skipped.\n        ext_pw_kernel_size: int\n            kernel size of the conv pointwise of the conformer.\n        kernel_size: int\n            kernel size.\n        depthwise_multiplier: int\n            number of input_dim channels duplication. this value\n             will be used to compute the hidden channels of the Conv1D.\n        dropout_rate: float\n            dropout rate.\n        causal: bool, optional\n            if set to True, convolution have no access\n             to future frames. default False.\n        batch_norm: bool, optional\n            if set to True, apply batchnorm before activation.\n            default False\n        chunk_se: int, optional\n            0 for offline SE.\n            1 for streaming SE, where mean is computed\n             by accumulated history until current chunk_se.\n            2 for streaming SE, where mean is computed\n             by only the current chunk.\n        chunk_size: int, optional\n            chunk size for cnn. default 18\n        activation: str, optional\n            activation function used in ConvModule,\n            default: "relu".\n        glu_type: str, optional\n            activation function used for the glu,\n            default: "sigmoid".\n        bias_in_glu: bool, optional\n            if set to True, use additive bias in the weight module\n             before GLU.\n        linear_glu_in_convm: bool, optional\n            if set to True, use GLULinear module,\n             otherwise, used GLUPointWiseConv module.\n              default to False.\n        export: bool, optional,\n            if set to True, padding is equal to 0.  This is for inference,\n             or onnx export.  Typically this is set by the export program or\n             the decoder program, and it isn\'t present in your config file.\n             default False\n    '
 
     def __init__(
         self,
@@ -600,24 +497,7 @@ class GLULinear(nn.Module):
 
 
 class FeedForward(nn.Module):
-    """FeedForward Module.
-    For more details see Conformer paper:
-        https://arxiv.org/pdf/2005.08100.pdf
-
-    Args:
-        d_model: int
-            input size.
-        d_inner: int
-            output size.
-        dropout_rate: float,
-            dropout rate.
-        activation: str,
-            activation function name,
-            one of ["relu", "swish", "sigmoid"],
-            sigmoid activation is only used with "glu_in_fnn=True",
-            default "sigmoid".
-        bias_in_glu: bool, optional
-    """
+    'FeedForward Module.\n    For more details see Conformer paper:\n        [external reference omitted]\n\n    Args:\n        d_model: int\n            input size.\n        d_inner: int\n            output size.\n        dropout_rate: float,\n            dropout rate.\n        activation: str,\n            activation function name,\n            one of ["relu", "swish", "sigmoid"],\n            sigmoid activation is only used with "glu_in_fnn=True",\n            default "sigmoid".\n        bias_in_glu: bool, optional\n    '
 
     def __init__(
         self,
@@ -676,48 +556,7 @@ def _pre_hook(
 
 
 class T5RelativeAttentionLogitBias(nn.Module):
-    """
-    This module implements the relative position bias described in Section
-    2.1 of the T5 paper: https://arxiv.org/pdf/1910.10683.pdf
-
-    The Huggingface implementation is used as a reference
-    https://github.com/huggingface/transformers/blob/v4.30.0/src/
-    transformers/models/t5/modeling_t5.py#L435
-
-    Modifies attention as Q*K^T + B, where B is a learned scalar bias based
-    on relative position of the query and key. It is HxNxN, where H is the
-    number of heads, N is the sequence length.
-
-    I've made these modifications to the original T5 bias:
-    - Skipping of the bucketing step. Original T5 bias converted rel
-      position distances into logarithmically increasing buckets. This is
-      supposed to help with length generalization.
-    - I just directly use rel position index as bias values, as we don't
-      need length generalization (40s max is good enough for ASR encoder),
-      and it keeps ONNX export simple.
-    - I've also extended it so that biases can be asymmetric, the default
-      implementation treats L->R and R->L the same. Asymmetric was found to
-      yield better results in my experiments.
-
-    Args:
-        num_heads: int
-            Number of attention heads
-        num_buckets: int
-            Number of buckets to use for relative attention bias. This is the
-            size of the learnable bias parameter. Bucketing is not yet
-            supported, so this defaults to -1 which means no bucketing is
-            used (max_distance determines size of bias param).
-        max_distance: int
-            Maximum distance to use for relative attention bias. With
-            num_buckets=-1, this directly controls the max size of the bias
-            parameter. When num_buckets > 0 is supported, this will control
-            the maximum distance for logarithmic bucketing after which all
-            positions are in the same bucket.
-        symmetric: bool
-            Whether to use symmetric or asymmetric biases. symmetric=False uses
-            2x number of bias params to distinguish L->R from R->L. This was
-            found to be better for the encoder.
-    """
+    "\n    This module implements the relative position bias described in Section\n    2.1 of the T5 paper: [external reference omitted]\n\n    The Huggingface implementation is used as a reference\n    [external reference omitted]\n    transformers/models/t5/modeling_t5.py#L435\n\n    Modifies attention as Q*K^T + B, where B is a learned scalar bias based\n    on relative position of the query and key. It is HxNxN, where H is the\n    number of heads, N is the sequence length.\n\n    I've made these modifications to the original T5 bias:\n    - Skipping of the bucketing step. Original T5 bias converted rel\n      position distances into logarithmically increasing buckets. This is\n      supposed to help with length generalization.\n    - I just directly use rel position index as bias values, as we don't\n      need length generalization (40s max is good enough for ASR encoder),\n      and it keeps ONNX export simple.\n    - I've also extended it so that biases can be asymmetric, the default\n      implementation treats L->R and R->L the same. Asymmetric was found to\n      yield better results in my experiments.\n\n    Args:\n        num_heads: int\n            Number of attention heads\n        num_buckets: int\n            Number of buckets to use for relative attention bias. This is the\n            size of the learnable bias parameter. Bucketing is not yet\n            supported, so this defaults to -1 which means no bucketing is\n            used (max_distance determines size of bias param).\n        max_distance: int\n            Maximum distance to use for relative attention bias. With\n            num_buckets=-1, this directly controls the max size of the bias\n            parameter. When num_buckets > 0 is supported, this will control\n            the maximum distance for logarithmic bucketing after which all\n            positions are in the same bucket.\n        symmetric: bool\n            Whether to use symmetric or asymmetric biases. symmetric=False uses\n            2x number of bias params to distinguish L->R from R->L. This was\n            found to be better for the encoder.\n    "
 
     def __init__(self, num_heads, num_buckets=-1, max_distance=1000, symmetric=False):
         super().__init__()
@@ -810,19 +649,7 @@ class T5RelativeAttentionLogitBias(nn.Module):
 
 
 class AbsolutePositionalEncoding(nn.Module):
-    """Absolute Positional encoding module.
-    This module implement Absolute sinusoidal positional encoding
-    from: https://arxiv.org/pdf/1706.03762.pdf
-
-    Args:
-        d_model: int
-            Input embedding size.
-        dropout_rate: float
-            dropout rate
-        max_len: int, optional
-            Maximum input length sequence, Default 5000
-
-    """
+    'Absolute Positional encoding module.\n    This module implement Absolute sinusoidal positional encoding\n    from: [external reference omitted]\n\n    Args:\n        d_model: int\n            Input embedding size.\n        dropout_rate: float\n            dropout rate\n        max_len: int, optional\n            Maximum input length sequence, Default 5000\n\n    '
 
     def __init__(self, d_model, dropout_rate, max_len=5000):
         """Construct an PositionalEncoding object."""
@@ -1044,38 +871,7 @@ class CausalConv2D(nn.Conv2d):
 
 
 class NemoConvSubsampling(torch.nn.Module):
-    """Convlutional subsampling module, taken from NeMo ASR
-    (https://github.com/NVIDIA/NeMo/blob/b367413645d5c72db3c2c96e46e95a
-    34501479cf/nemo/collections/asr/parts/submodules/subsampling.py)
-
-    Striding Subsampling: "Speech-Transformer: A No-Recurrence
-    Sequence-to-Sequence Model for Speech Recognition" by Linhao Dong
-    et al. (https://ieeexplore.ieee.org/document/8462506)
-
-
-    Compared with the EncoderConv2D (`input_layer: custom`), this is a
-    much simplified approach, and uses no LayerNorm and far fewer Conv2Ds.
-    Moreover, depthwise convolutions are used to reduce FLOPs, but the first
-      layer is kept as a regular convolution so as not to degrade accuracy.
-
-    `Striding` and `dw_striding` are the same except that the latter uses
-    depthwise convolutions after the first layer, whereas the former does not.
-
-    Args:
-        subsampling_factor (int): Time reduction factor
-        feat_in (int): size of the input features
-        feat_out (int): size of the output features
-        subsampling (str): The subsampling technique, choose from
-            {"striding", "dw-striding", "striding_conv1d",
-            "dw_striding_conv1d"}
-        conv_channels (int): Number of channels for the convolution layers,
-                            default is 256.
-        subsampling_conv_chunking_factor (int): Input chunking factor which
-            can be -1 (no chunking) 1 (auto) or a power of 2. Default is 1
-        activation (Module): activation function, default is nn.ReLU()
-        is_causal (bool): whether to use causal Conv1/2D, where each step will
-            have limited access to locations on its right or left
-    """
+    'Convlutional subsampling module, taken from NeMo ASR\n    ([external reference omitted]\n    34501479cf/nemo/collections/asr/parts/submodules/subsampling.py)\n\n    Striding Subsampling: "Speech-Transformer: A No-Recurrence\n    Sequence-to-Sequence Model for Speech Recognition" by Linhao Dong\n    et al. ([external reference omitted])\n\n\n    Compared with the EncoderConv2D (`input_layer: custom`), this is a\n    much simplified approach, and uses no LayerNorm and far fewer Conv2Ds.\n    Moreover, depthwise convolutions are used to reduce FLOPs, but the first\n      layer is kept as a regular convolution so as not to degrade accuracy.\n\n    `Striding` and `dw_striding` are the same except that the latter uses\n    depthwise convolutions after the first layer, whereas the former does not.\n\n    Args:\n        subsampling_factor (int): Time reduction factor\n        feat_in (int): size of the input features\n        feat_out (int): size of the output features\n        subsampling (str): The subsampling technique, choose from\n            {"striding", "dw-striding", "striding_conv1d",\n            "dw_striding_conv1d"}\n        conv_channels (int): Number of channels for the convolution layers,\n                            default is 256.\n        subsampling_conv_chunking_factor (int): Input chunking factor which\n            can be -1 (no chunking) 1 (auto) or a power of 2. Default is 1\n        activation (Module): activation function, default is nn.ReLU()\n        is_causal (bool): whether to use causal Conv1/2D, where each step will\n            have limited access to locations on its right or left\n    '
 
     def __init__(
         self,
@@ -1399,7 +1195,7 @@ class NemoConvSubsampling(torch.nn.Module):
                 # if needed.
                 # avoiding a bug / feature limiting indexing of tensors
                 # to 2**31.
-                # see https://github.com/pytorch/pytorch/issues/80020
+                # see [external reference omitted]
                 x_ceil = 2**31 / self._conv_channels * self._stride * self._stride
                 need_to_split = torch.numel(x) > x_ceil
             else:
@@ -1458,7 +1254,7 @@ class NemoConvSubsampling(torch.nn.Module):
                     torch.nn.init.uniform_(self.conv[idx + 1].weight, -pw_max, pw_max)
                     torch.nn.init.uniform_(self.conv[idx + 1].bias, -pw_max, pw_max)
 
-                # init fc (80 * 64 = 5120 from https://github.com/kssteven418/
+                # init fc (80 * 64 = 5120 from [external reference omitted]
                 # Squeezeformer/blob/13c97d6cf92f2844d2cb3142b4c5bfa9ad1a8951/
                 # src/models/conformer_encoder.py#L487
                 fc_scale = (self._feat_out * self._feat_in / self._sampling_num) ** -0.5
@@ -1475,7 +1271,7 @@ class NemoConvSubsampling(torch.nn.Module):
             cf = self.subsampling_conv_chunking_factor
         else:
             # avoiding a bug / feature limiting indexing of tensors to 2**31
-            # see https://github.com/pytorch/pytorch/issues/80020
+            # see [external reference omitted]
             x_ceil = 2**31 / self._conv_channels * self._stride * self._stride
             p = math.ceil(math.log(torch.numel(x) / x_ceil, 2))
             cf = 2**p
@@ -1505,7 +1301,7 @@ class NemoConvSubsampling(torch.nn.Module):
             else:
                 # avoiding a bug / feature limiting indexing of tensors
                 # to 2**31
-                # see https://github.com/pytorch/pytorch/issues/80020
+                # see [external reference omitted]
                 p = math.ceil(math.log(torch.numel(x) / 2**31, 2))
                 cf = 2**p
 

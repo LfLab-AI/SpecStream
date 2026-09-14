@@ -475,7 +475,7 @@ class MambaAttnBackendBase(AttentionBackend):
         mamba_indices = self.req_to_token_pool.get_mamba_indices(req_pool_indices)
         self.state_indices_list[bs - 1][: len(mamba_indices)].copy_(mamba_indices)
 
-        # If topk > 1, we need to use retrieve_next_token and retrieve_next_sibling to handle the eagle tree custom attention mask
+        # If topk > 1, we need to use retrieve_next_token and retrieve_next_sibling to handle the backend tree custom attention mask
         if forward_mode.is_target_verify() and spec_info.topk > 1:
             # They are None during cuda graph capture so skip the copy_...
             # self.retrieve_next_token_list[bs - 1].copy_(spec_info.retrive_next_token)
@@ -536,7 +536,7 @@ class MambaAttnBackendBase(AttentionBackend):
         else:
             raise ValueError(f"Invalid forward mode: {forward_mode=}")
 
-        # If topk > 1, we need to use retrieve_next_token and retrieve_next_sibling to handle the eagle tree custom attention mask
+        # If topk > 1, we need to use retrieve_next_token and retrieve_next_sibling to handle the backend tree custom attention mask
         if forward_mode.is_target_verify() and spec_info.topk > 1:
             bs_without_pad = spec_info.retrive_next_token.shape[0]
             self.retrieve_next_token_list[bs - 1][:bs_without_pad].copy_(

@@ -220,7 +220,7 @@ def get_rope_scaling(config):
 
 
 class ScalingRotaryEmbedding(RotaryEmbedding):
-    """Scale the RotaryEmbedding in a way similar to YaRN method. https://arxiv.org/pdf/2309.00071."""
+    'Scale the RotaryEmbedding in a way similar to YaRN method. [external reference omitted]'
 
     def __init__(
         self,

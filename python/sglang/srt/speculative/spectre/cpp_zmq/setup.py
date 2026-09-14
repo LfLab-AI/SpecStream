@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import os
+
 import pybind11
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
@@ -7,8 +9,8 @@ from setuptools.command.build_ext import build_ext
 BASE_DIR = Path(__file__).resolve().parent
 SRC_DIR = BASE_DIR / "src"
 INCLUDE_DIR = BASE_DIR / "include"
-SYSTEM_INCLUDE_DIR = "/usr/include"  # cppzmq header path, e.g. /usr/include/zmq.hpp
-zmq_lib_dir = "/usr/lib"  # ZMQ library path
+SYSTEM_INCLUDE_DIR = os.environ.get("ZMQ_INCLUDE_DIR", "/usr/include")  # cppzmq header path, e.g. /usr/include/zmq.hpp
+zmq_lib_dir = os.environ.get("ZMQ_LIBRARY_DIR", "/usr/lib")  # ZMQ library path
 zmq_libs = ["zmq"]  # Link against libzmq.so
 
 
@@ -38,7 +40,6 @@ ext_modules = [
 setup(
     name="spectre_zmq",
     version="0.1.0",
-    author="JD",
     description="Full duplex ZMQ C++ module for Python",
     ext_modules=ext_modules,
     cmdclass={"build_ext": build_ext},

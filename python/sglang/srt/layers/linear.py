@@ -719,15 +719,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         loaded_weight: torch.Tensor,
         output_sizes: list[int] | None = None,
     ):
-        """
-        Handle special case for models where MLP layers are already
-        fused on disk. In this case, we have no shard id. This function
-        determmines the shard id by splitting these layers and then calls
-        the weight loader using the shard id.
-
-        An example of a model with these fused layers:
-        https://huggingface.co/microsoft/Phi-3-mini-4k-instruct
-        """
+        '\n        Handle special case for models where MLP layers are already\n        fused on disk. In this case, we have no shard id. This function\n        determmines the shard id by splitting these layers and then calls\n        the weight loader using the shard id.\n\n        An example of a model with these fused layers:\n        [external reference omitted]\n        '
 
         current_shard_offset = 0
         shard_offsets: List[Tuple[int, int, int]] = []
@@ -979,15 +971,7 @@ class QKVParallelLinear(ColumnParallelLinear):
     def _load_fused_module_from_checkpoint(
         self, param: BasevLLMParameter, loaded_weight: torch.Tensor
     ):
-        """
-        Handle special case for models where QKV layers are already
-        fused on disk. In this case, we have no shard id. This function
-        determmines the shard id by splitting these layers and then calls
-        the weight loader using the shard id.
-
-        An example of a model with these fused layers:
-        https://huggingface.co/microsoft/Phi-3-mini-4k-instruct
-        """
+        '\n        Handle special case for models where QKV layers are already\n        fused on disk. In this case, we have no shard id. This function\n        determmines the shard id by splitting these layers and then calls\n        the weight loader using the shard id.\n\n        An example of a model with these fused layers:\n        [external reference omitted]\n        '
         shard_offsets = [
             # (shard_id, shard_offset, shard_size)
             ("q", 0, self.total_num_heads * self.head_size),
@@ -1476,7 +1460,7 @@ class RowParallelLinear(LinearBase):
                 use_presharded_weights=self.use_presharded_weights,
             )
         else:
-            # `params` is defined in `vllm/model_executor/parameter.py`,
+            # `params` is defined in `backend/model_executor/parameter.py`,
             # It does not support additional parameters.
             # However, after QuantizedRL reload, params might still need tp_rank
             try:

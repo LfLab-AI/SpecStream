@@ -170,34 +170,7 @@ class _DumperState:
 
 
 class _Dumper:
-    """Utility to dump tensors, which can be useful when comparison checking models.
-
-    Example usage:
-    dumper.dump("layer_start__hidden_states", hidden_states, layer_id=self.layer_id)
-    dumper.step()
-
-    Import from non-SGLang system:
-    ```
-    import sys
-    sys.path.append("/YOUR_PATH/sglang/python/sglang/srt/debug_utils")
-    from dumper import dumper
-    ```
-
-    Then run the program:
-    `DUMPER_ENABLE=1 python ...`
-
-    Auto-cleanup old dumps before first write:
-    `DUMPER_CLEANUP_PREVIOUS=1 python ...`
-
-    Alternatively, disable at startup and configure via HTTP:
-    1. `python ...`
-    2. sglang mode:  `curl -X POST http://localhost:30000/dumper/configure -d '{"enable": true}'`
-       standalone:   `curl -X POST http://localhost:40000/dumper/configure -d '{"enable": true}'`
-    3. `curl -X POST http://localhost:30000/dumper/configure -d '{"enable": true, "filter": "layer_id=[0-3]"}'`
-    4. `curl -X POST http://localhost:30000/dumper/reset`
-
-    Related: `sglang.srt.debug_utils.dump_comparator` for dump comparison
-    """
+    'Utility to dump tensors, which can be useful when comparison checking models.\n\n    Example usage:\n    dumper.dump("layer_start__hidden_states", hidden_states, layer_id=self.layer_id)\n    dumper.step()\n\n    Import from non-SGLang system:\n    ```\n    import sys\n    sys.path.append("/YOUR_PATH/sglang/python/sglang/srt/debug_utils")\n    from dumper import dumper\n    ```\n\n    Then run the program:\n    `DUMPER_ENABLE=1 python ...`\n\n    Auto-cleanup old dumps before first write:\n    `DUMPER_CLEANUP_PREVIOUS=1 python ...`\n\n    Alternatively, disable at startup and configure via HTTP:\n    1. `python ...`\n    2. sglang mode:  `curl -X POST [external reference omitted] -d \'{"enable": true}\'`\n       standalone:   `curl -X POST [external reference omitted] -d \'{"enable": true}\'`\n    3. `curl -X POST [external reference omitted] -d \'{"enable": true, "filter": "layer_id=[0-3]"}\'`\n    4. `curl -X POST [external reference omitted]\n\n    Related: `sglang.srt.debug_utils.dump_comparator` for dump comparison\n    '
 
     def __init__(self, *, config: DumperConfig):
         self._config = config
@@ -1162,7 +1135,7 @@ def _get_local_ip_by_remote() -> Optional[str]:
     try:
         s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
         # Google's public DNS server, see
-        # https://developers.google.com/speed/public-dns/docs/using#addresses
+        # [external reference omitted]
         s.connect(("2001:4860:4860::8888", 80))  # Doesn't need to be reachable
         return s.getsockname()[0]
     except Exception:

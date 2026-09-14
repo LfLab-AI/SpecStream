@@ -96,10 +96,6 @@ all = [
   "sglang[tracing]",
 ]
 
-[project.urls]
-"Homepage" = "https://github.com/sgl-project/sglang"
-"Bug Tracker" = "https://github.com/sgl-project/sglang/issues"
-
 [project.scripts]
 sglang = "sglang.cli.main:main"
 

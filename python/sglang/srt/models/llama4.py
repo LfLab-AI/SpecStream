@@ -343,10 +343,10 @@ class Llama4Attention(nn.Module):
 
         q, k = qk.split([self.q_size, self.kv_size], dim=-1)
 
-        # We are applying temperature tuning (https://arxiv.org/abs/2501.19399) to NoPE layers, where
+        # We are applying temperature tuning ([external reference omitted]) to NoPE layers, where
         # the inference-time temperature tuning function is customized to not affect short context
         # while working at very long context
-        # https://arxiv.org/abs/2501.19399
+        # [external reference omitted]
         if self.attn_temperature_tuning and not self.use_rope:
             q = self._mul_attn_scale(positions=positions, q=q)
 

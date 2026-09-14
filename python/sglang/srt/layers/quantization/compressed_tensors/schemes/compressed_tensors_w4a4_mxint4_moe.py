@@ -313,7 +313,7 @@ class CompressedTensorsMxInt4MoE(CompressedTensorsMoEScheme):
         routing_method_type = layer.routing_method_type
         assert routing_method_type is not None
         # DeepSeekV3 style routing requires float32 router logits,
-        # see this PR for details: https://github.com/flashinfer-ai/flashinfer/commit/d84e1d560da0a27961c19ca788d96c19cb9dcfb6
+        # see this PR for details: [external reference omitted]
         if routing_method_type == RoutingMethodType.DeepSeekV3:
             router_logits = router_logits.to(torch.float32)
         routed_scaling_factor = self.moe_runner_config.routed_scaling_factor

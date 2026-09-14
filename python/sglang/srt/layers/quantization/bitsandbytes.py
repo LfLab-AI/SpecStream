@@ -26,10 +26,7 @@ if TYPE_CHECKING:
 
 
 class BitsAndBytesConfig(QuantizationConfig):
-    """Config class for BitsAndBytes Quantization.
-
-    Reference: https://arxiv.org/abs/2305.14314
-    """
+    'Config class for BitsAndBytes Quantization.\n\n    Reference: [external reference omitted]\n    '
 
     def __init__(
         self,
@@ -409,7 +406,7 @@ def apply_bnb_4bit(
         output_size = quant_states[i].shape[0]
         # It is more efficient to use out kwarg like
         # matmul_4bit(..., out = ...).  Infeasible now due to the bug
-        # https://github.com/TimDettmers/bitsandbytes/issues/1235.
+        # [external reference omitted]
         # Need to change  after the bug is fixed.
         out[:, current_index : current_index + output_size] = matmul_4bit(
             x, weight[offsets[i] : offsets[i + 1]].t(), quant_states[i]

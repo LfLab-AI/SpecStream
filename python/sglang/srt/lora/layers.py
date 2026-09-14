@@ -169,7 +169,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             "Error in sglang/python/sglang/srt/lora/layers.py - VocabParallelEmbeddingWithLoRA \n"
             "Current SGLang codebase did not support tuned lora with extra/added tokens. \n"
             "[TODO]: \n"
-            "1. Refer to this commit: https://github.com/yushengsu-thu/sglang/commit/90415211eee8a28a316de262583d4d33fa615d10#diff-191177438bcc223837963de63c005850371f8c8a860acb153b26744b66ecc623 to complete \n"
+            "1. Refer to this commit: [dependency documentation] to complete \n"
             "2. And then you need to modified the en/decoder tokenizer - tokenizer_manager.py to support extra_token_embedding in-place. \n"
         )
 
@@ -688,16 +688,7 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
-    """
-    Wrapper around FusedMoE that integrates LoRA into the MoE computation.
-
-    Design: LoRA deltas are added at specific points in the MoE forward pass:
-    1. After gate_up projection, BEFORE activation (halfway through)
-    2. After down projection, BEFORE final reduction
-
-    This follows the vLLM/HF approach where LoRA is fused into the computation
-    rather than computed independently and added at the end.
-    """
+    '\n    Wrapper around FusedMoE that integrates LoRA into the MoE computation.\n\n    Design: LoRA deltas are added at specific points in the MoE forward pass:\n    1. After gate_up projection, BEFORE activation (halfway through)\n    2. After down projection, BEFORE final reduction\n\n    This follows the backend/HF approach where LoRA is fused into the computation\n    rather than computed independently and added at the end.\n    '
 
     def __init__(
         self,

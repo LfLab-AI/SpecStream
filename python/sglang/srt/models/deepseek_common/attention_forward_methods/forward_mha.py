@@ -286,7 +286,7 @@ class DeepseekMHAForwardMixin:
         # In normal mha, the k and v tensors will become overly large when the prefix length is long.
         # To avoid this, we split the kv cache into chunks and process them one after another.
         # Since mha is compute friendly, the for loop induced here will not introduce significant overhead.
-        # The top comments in https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/mla/common.py
+        # The top comments in [external reference omitted]
         # will be helpful for understanding the purpose of this function.
 
         # First do normal mha forward to get output for extended part

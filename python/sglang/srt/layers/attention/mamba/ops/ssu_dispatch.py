@@ -224,32 +224,7 @@ def selective_state_update(
     retrieve_parent_token: torch.Tensor | None = None,
     intermediate_state_indices: torch.Tensor | None = None,
 ) -> None:
-    """Dispatch selective-state-update to the configured backend.
-
-    This function provides a unified interface regardless of the underlying
-    backend. Backend-specific argument adaptation is handled inside each
-    :class:`MambaSSUBackend` subclass.
-
-    Args:
-        state: SSM state tensor (batch, nheads, dim, dstate)
-        x: Input tensor
-        dt: Delta time tensor
-        A: A matrix
-        B: B matrix
-        C: C matrix
-        D: Optional D vector
-        z: Optional z tensor for gating
-        dt_bias: Optional dt bias
-        dt_softplus: Whether to apply softplus to dt
-        state_batch_indices: Optional batch indices for state
-        out: Preallocated output tensor (in-place updated)
-        disable_state_update: If True, don't write back to state (for speculative verify)
-        intermediate_states_buffer: Buffer to cache intermediate states
-        cache_steps: Total number of steps in the buffer
-        retrieve_parent_token: (batch, T) tensor of parent token indices for EAGLE tree attention
-        intermediate_state_indices: (batch,) tensor of indices for intermediate_states_buffer operations.
-            If provided, uses these indices instead of state_batch_indices for the buffer.
-    """
+    "Dispatch selective-state-update to the configured backend.\n\n    This function provides a unified interface regardless of the underlying\n    backend. Backend-specific argument adaptation is handled inside each\n    :class:`MambaSSUBackend` subclass.\n\n    Args:\n        state: SSM state tensor (batch, nheads, dim, dstate)\n        x: Input tensor\n        dt: Delta time tensor\n        A: A matrix\n        B: B matrix\n        C: C matrix\n        D: Optional D vector\n        z: Optional z tensor for gating\n        dt_bias: Optional dt bias\n        dt_softplus: Whether to apply softplus to dt\n        state_batch_indices: Optional batch indices for state\n        out: Preallocated output tensor (in-place updated)\n        disable_state_update: If True, don't write back to state (for speculative verify)\n        intermediate_states_buffer: Buffer to cache intermediate states\n        cache_steps: Total number of steps in the buffer\n        retrieve_parent_token: (batch, T) tensor of parent token indices for backend tree attention\n        intermediate_state_indices: (batch,) tensor of indices for intermediate_states_buffer operations.\n            If provided, uses these indices instead of state_batch_indices for the buffer.\n    "
     assert _mamba_ssu_backend is not None, (
         "Mamba selective_state_update backend not initialized. "
         "Call initialize_mamba_selective_state_update_backend() first."

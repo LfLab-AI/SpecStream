@@ -1,5 +1,5 @@
 # Adapt from
-# https://github.com/mlc-ai/xgrammar/blob/v0.1.17/python/xgrammar/kernels/apply_token_bitmask_inplace_triton.py
+# [external reference omitted]
 
 from typing import List, Optional, Union
 

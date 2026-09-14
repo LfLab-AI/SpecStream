@@ -131,7 +131,7 @@ class ScheduleBatchDisaggregationDecodeMixin:
                 req.grammar.finished = req.finished()
         self.output_ids = torch.tensor(self.output_ids, device=self.device)
 
-        # Simulate the eagle run.
+        # Simulate the backend run.
         if self.spec_algorithm.is_eagle():
             num_states = server_args.speculative_eagle_topk
             if server_args.enable_multi_layer_eagle:

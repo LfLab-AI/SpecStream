@@ -108,10 +108,6 @@ srt_npu = []
 all_npu = ["sglang[diffusion]"]
 dev_npu = ["sglang[all_npu]", "sglang[test]"]
 
-[project.urls]
-"Homepage" = "https://github.com/sgl-project/sglang"
-"Bug Tracker" = "https://github.com/sgl-project/sglang/issues"
-
 [project.scripts]
 sglang = "sglang.cli.main:main"
 

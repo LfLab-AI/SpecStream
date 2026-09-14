@@ -348,7 +348,7 @@ class Envs:
     # Default to the pick from flashinfer
     SGLANG_FLASHINFER_WORKSPACE_SIZE = EnvInt(384 * 1024 * 1024)
     # Skip-softmax threshold scale factor for TRT-LLM attention (prefill and decode separately).
-    # None = standard attention. See https://arxiv.org/abs/2512.12087
+    # None = standard attention. See [external reference omitted]
     SGLANG_SKIP_SOFTMAX_PREFILL_THRESHOLD_SCALE_FACTOR = EnvFloat(None)
     SGLANG_SKIP_SOFTMAX_DECODE_THRESHOLD_SCALE_FACTOR = EnvFloat(None)
     # TODO(mmangkad): Remove this once the FlashInfer unified allreduce-fusion
@@ -406,7 +406,7 @@ class Envs:
     # sgl-kernel
     SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK = EnvBool(False)
 
-    # vLLM dependencies (TODO: they have been deprecated, we can remove them safely)
+    # backend dependencies (TODO: they have been deprecated, we can remove them safely)
     USE_VLLM_CUTLASS_W8A8_FP8_KERNEL = EnvBool(False)
 
     USE_TRITON_W8A8_FP8_KERNEL = EnvBool(False)

@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 # JINJA TEMPLATE CONTENT FORMAT DETECTION
 # ============================================================================
 #
-# This adapts vLLM's approach for detecting chat template content format:
-# https://github.com/vllm-project/vllm/blob/02f0c7b220422792f5e53de2a7d51d2d3ff2df28/vllm/entrypoints/chat_utils.py#L296-L313
+# This adapts backend's approach for detecting chat template content format:
+# [external reference omitted]
 # - Analyzes Jinja template AST to detect content iteration patterns
 # - 'openai' format: templates with {%- for content in message['content'] -%} loops
 # - 'string' format: templates that expect simple string content

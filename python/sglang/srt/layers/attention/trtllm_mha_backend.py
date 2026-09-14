@@ -884,7 +884,7 @@ class TRTLLMHAAttnBackend(FlashInferAttnBackend):
 
 
 class TRTLLMHAAttnMultiStepDraftBackend(FlashInferMultiStepDraftBackend):
-    """Multi-step TRTLLM MHA attention kernel used by EAGLE."""
+    'Multi-step TRTLLM MHA attention kernel used by backend.'
 
     def __init__(
         self, model_runner: ModelRunner, topk: int, speculative_num_steps: int

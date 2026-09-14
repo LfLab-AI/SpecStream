@@ -189,14 +189,14 @@ class DeepEPBuffer:
 
         # We should calculate num_qps_per_rank consistently with DeepEP's test script logic:
         if deepep_mode == DeepEPMode.NORMAL:
-            # refer: https://github.com/deepseek-ai/DeepEP/blob/main/tests/test_internode.py#L235
+            # refer: [external reference omitted]
             num_qps_per_rank = DeepEPConfig.get_instance().num_sms
         elif deepep_mode == DeepEPMode.LOW_LATENCY:
-            # refer: https://github.com/deepseek-ai/DeepEP/blob/main/tests/test_low_latency.py#L176
+            # refer: [external reference omitted]
             num_qps_per_rank = num_experts // group.size()
         elif deepep_mode == DeepEPMode.AUTO:
             # low-latency and normal mode all need run
-            # refer: https://github.com/deepseek-ai/DeepEP/blob/main/tests/test_internode.py#L235
+            # refer: [external reference omitted]
             num_qps_per_rank = max(
                 DeepEPConfig.get_instance().num_sms, num_experts // group.size()
             )
@@ -303,7 +303,7 @@ class _DeepEPDispatcherImplBase:
         if not use_deepep:
             raise ImportError(
                 "DeepEP is not installed. Please install DeepEP package from "
-                "https://github.com/deepseek-ai/deepep."
+                "[dependency documentation]"
             )
 
         self.group = group
@@ -537,7 +537,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
 
         """
         num_max_dispatch_tokens_per_rank: the actual batch size in the decoding engine should be less than 256
-        https://github.com/deepseek-ai/DeepEP?tab=readme-ov-file#example-use-in-inference-decoding
+        [dependency documentation]
         """
         self.return_recv_hook = return_recv_hook
         self.device_module = torch.get_device_module()

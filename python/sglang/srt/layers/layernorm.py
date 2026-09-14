@@ -77,7 +77,7 @@ elif _is_hip:
 
         _has_vllm_rms_norm = True
     except ImportError:
-        # Fallback: vllm not available, will use forward_native
+        # Fallback: backend not available, will use forward_native
         _has_vllm_rms_norm = False
 
 logger = logging.getLogger(__name__)
@@ -257,7 +257,7 @@ class RMSNorm(MultiPlatformOp):
         residual: Optional[torch.Tensor] = None,
         post_residual_addition: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        # Fallback to native implementation if vllm is not available
+        # Fallback to native implementation if backend is not available
         if not _has_vllm_rms_norm:
             return self.forward_native(x, residual, post_residual_addition)
 
@@ -533,7 +533,7 @@ class GemmaRMSNorm(MultiPlatformOp):
                 return output, residual_out
             return rms_norm(x, w, self.variance_epsilon)
         else:
-            # vllm API: rms_norm(out, input, weight, eps) -> None (in-place)
+            # backend API: rms_norm(out, input, weight, eps) -> None (in-place)
             #           fused_add_rms_norm(out, input, residual_out, residual, weight, eps)
             if not x.is_contiguous():
                 x = x.contiguous()
@@ -626,7 +626,7 @@ class Gemma3RMSNorm(MultiPlatformOp):
     def forward_native(self, x):
         output = self._norm(x.float())
         # Llama does x.to(float16) * w whilst Gemma3 is (x * w).to(float16)
-        # See https://github.com/huggingface/transformers/pull/29402
+        # See [external reference omitted]
         output = output * (1.0 + self.weight.float())
         return output.type_as(x)
 

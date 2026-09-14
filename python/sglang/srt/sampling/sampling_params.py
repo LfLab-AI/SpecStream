@@ -29,13 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 class SamplingParams:
-    """
-    The sampling parameters.
-
-    See docs/backend/sampling_params.md or
-    https://docs.sglang.io/backend/sampling_params.html
-    for the documentation.
-    """
+    '\n    The sampling parameters.\n\n    See docs/backend/sampling_params.md or\n    [external reference omitted]\n    for the documentation.\n    '
 
     def __init__(
         self,

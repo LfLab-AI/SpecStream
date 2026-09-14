@@ -331,7 +331,7 @@ class ModelOptQuantConfig(QuantizationConfig):
     ):  # noqa: B027
         # Map excluded module patterns from HF layout to sglang layout.
         # Ref: HF hf_quant_config.json for nvidia/Kimi-K2.5-NVFP4
-        # https://huggingface.co/nvidia/Kimi-K2.5-NVFP4/blob/main/hf_quant_config.json
+        # [external reference omitted]
         if self.exclude_modules:
             mapped = hf_to_sglang_mapper.apply_list(self.exclude_modules)
             expanded: List[str] = []

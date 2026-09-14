@@ -512,7 +512,7 @@ class PixtralHFTransformerBlock(nn.Module):
         self.layer_id = layer_id
         self.attention_norm = RMSNorm(config.hidden_size, eps=1e-5)
 
-        # Use SGLang's VisionAttention instead of vLLM's PixtralHFAttention
+        # Use SGLang's VisionAttention instead of backend's PixtralHFAttention
         self.attention = VisionAttention(
             embed_dim=config.hidden_size,
             num_heads=config.num_attention_heads,

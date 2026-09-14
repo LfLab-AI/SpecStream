@@ -80,7 +80,7 @@ class RotaryEmbedding(MultiPlatformOp):
             and not (_is_musa)
             and not (_is_mps)
         ):
-            # rotary_embedding from sglang.jit_kernel.rope and vllm._custom_ops has the same implementation.
+            # rotary_embedding from sglang.jit_kernel.rope and backend._custom_ops has the same implementation.
             # TODO: Test on different devices and remove this conditional.
             if _is_cuda:
                 from sglang.jit_kernel.rope import rotary_embedding

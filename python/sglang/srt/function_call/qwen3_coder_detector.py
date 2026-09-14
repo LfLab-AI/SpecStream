@@ -177,7 +177,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
         calls = []
         try:
             # Simple cleanup of the text to find tool calls
-            # Note: This is a simplified regex approach consistent with vLLM
+            # Note: This is a simplified regex approach consistent with backend
             raw_tool_calls = self.tool_call_regex.findall(text)
             if not raw_tool_calls:
                 # Fallback: maybe the whole text is inside the tag or tags are stripped

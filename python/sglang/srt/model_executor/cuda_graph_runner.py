@@ -1428,7 +1428,7 @@ CUDA_GRAPH_CAPTURE_FAILED_MSG = (
     "2. set --cuda-graph-max-bs to a smaller value (e.g., 16)\n"
     "3. disable torch compile by not using --enable-torch-compile\n"
     "4. disable CUDA graph by --disable-cuda-graph. (Not recommended. Huge performance loss)\n"
-    "Open an issue on GitHub https://github.com/sgl-project/sglang/issues/new/choose \n"
+    "Open an issue on GitHub [dependency documentation] \n"
 )
 
 

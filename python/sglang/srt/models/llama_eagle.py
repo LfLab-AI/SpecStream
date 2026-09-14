@@ -47,7 +47,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         super().__init__(config, layer_id, quant_config, prefix)
 
         # Skip the input_layernorm
-        # https://github.com/SafeAILab/EAGLE/blob/35c78f6cdc19a73e05cf5c330b4c358dad970c6a/eagle/model/cnets.py#L427
+        # [external reference omitted]
         if layer_id == 0:
             del self.input_layernorm
             setattr(self, "input_layernorm", lambda x: x)

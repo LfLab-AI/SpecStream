@@ -11,10 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""
-Faster constrained decoding with jump forward decoding / compressed finite state machine.
-Reference: https://lmsys.org/blog/2024-02-05-compressed-fsm/
-"""
+'\nFaster constrained decoding with jump forward decoding / compressed finite state machine.\nReference: [external reference omitted]\n'
 
 import dataclasses
 import logging
@@ -122,7 +119,7 @@ def init_state_to_jump_forward(regex_string):
                 byte_ = ord(c)
             elif len(c) > 1:
                 # FIXME: This logic is due to the leading \x00
-                # https://github.com/outlines-dev/outlines/pull/930
+                # [external reference omitted]
                 byte_ = int(symbols[0][1:], 16)
 
             if byte_ is not None:

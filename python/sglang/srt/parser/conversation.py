@@ -221,8 +221,8 @@ class Conversation:
                     ret += tag
             return ret
         elif self.sep_style == SeparatorStyle.CHATGLM:
-            # source: https://huggingface.co/THUDM/chatglm-6b/blob/1d240ba371910e9282298d4592532d7f0f3e9f3e/modeling_chatglm.py#L1302-L1308
-            # source2: https://huggingface.co/THUDM/chatglm2-6b/blob/e186c891cf64310ac66ef10a87e6635fa6c2a579/modeling_chatglm.py#L926
+            # source: [external reference omitted]
+            # source2: [external reference omitted]
             round_add_n = 1 if self.name == "chatglm2" else 0
             if system_prompt:
                 ret = system_prompt + self.sep
@@ -257,7 +257,7 @@ class Conversation:
                     ret += role
             return ret
         elif self.sep_style == SeparatorStyle.CHATINTERN:
-            # source: https://huggingface.co/internlm/internlm-chat-7b-8k/blob/bd546fa984b4b0b86958f56bf37f94aa75ab8831/modeling_internlm.py#L771
+            # source: [external reference omitted]
             seps = [self.sep, self.sep2]
             ret = system_prompt
             for i, (role, message) in enumerate(self.messages):
@@ -694,8 +694,8 @@ def generate_chat_conv(
 
 
 # llama2 template
-# reference: https://github.com/lm-sys/FastChat/blob/main/fastchat/conversation.py
-# reference: https://github.com/facebookresearch/llama/blob/1a240688810f8036049e8da36b073f63d2ac552c/llama/generation.py#L212
+# reference: [external reference omitted]
+# reference: [external reference omitted]
 register_conv_template(
     Conversation(
         name="llama-2",
@@ -708,7 +708,7 @@ register_conv_template(
     )
 )
 
-# reference: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/blob/main/chat_template.json
+# reference: [external reference omitted]
 register_conv_template(
     Conversation(
         name="mistral",
@@ -736,7 +736,7 @@ register_conv_template(
     )
 )
 
-# reference: https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct/blob/main/chat_template.json
+# reference: [external reference omitted]
 register_conv_template(
     Conversation(
         name="llama-4",
@@ -824,7 +824,7 @@ register_conv_template(
         stop_str=["<|end_of_text|>", "<|eot_id|>"],
     )
 )
-# Reference: https://github.com/InternLM/lmdeploy/blob/387bf54b4f124e72aab30ae9755f562e435d3d01/lmdeploy/model.py#L425-L442
+# Reference: [external reference omitted]
 register_conv_template(
     Conversation(
         name="internlm2-chat",
@@ -849,7 +849,7 @@ register_conv_template(
     )
 )
 
-# Reference: https://huggingface.co/docs/transformers/main/model_doc/qwen2_vl#usage-example
+# Reference: [external reference omitted]
 register_conv_template(
     Conversation(
         name="qwen2-vl",
@@ -908,7 +908,7 @@ register_conv_template(
     )
 )
 
-# Reference: https://huggingface.co/google/gemma-3-4b-it/blob/main/config.json
+# Reference: [external reference omitted]
 register_conv_template(
     Conversation(
         name="gemma-it",
@@ -923,7 +923,7 @@ register_conv_template(
     )
 )
 
-# Reference: https://huggingface.co/Alibaba-NLP/gme-Qwen2-VL-2B-Instruct#usage
+# Reference: [external reference omitted]
 register_conv_template(
     Conversation(
         name="gme-qwen2-vl",
@@ -937,7 +937,7 @@ register_conv_template(
     )
 )
 
-# Reference: https://huggingface.co/openbmb/MiniCPM-V-2_6#usage
+# Reference: [external reference omitted]
 register_conv_template(
     Conversation(
         name="minicpmv",
@@ -952,7 +952,7 @@ register_conv_template(
     )
 )
 
-# Reference: https://github.com/deepseek-ai/Janus?tab=readme-ov-file#janus-pro
+# Reference: [external reference omitted]
 register_conv_template(
     Conversation(
         name="janus-pro",
@@ -967,7 +967,7 @@ register_conv_template(
     )
 )
 
-# Reference: https://huggingface.co/openbmb/MiniCPM-o-2_6#usage
+# Reference: [external reference omitted]
 register_conv_template(
     Conversation(
         name="minicpmo",
@@ -982,7 +982,7 @@ register_conv_template(
     )
 )
 
-# Reference: https://huggingface.co/moonshotai/Kimi-VL-A3B-Instruct/blob/main/chat_template.jinja
+# Reference: [external reference omitted]
 register_conv_template(
     Conversation(
         name="kimi-vl",
@@ -1059,7 +1059,7 @@ MODEL_TYPE_TO_TEMPLATE = {
 
 @register_conv_template_matching_function
 def match_points_v15_chat(model_path: str):
-    # reference: https://github.com/sgl-project/sglang/issues/12791
+    # reference: [external reference omitted]
     if re.search(r"\bpoints\b", model_path, re.IGNORECASE):
         return "points-v15-chat"
 

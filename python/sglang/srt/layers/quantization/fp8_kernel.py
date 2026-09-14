@@ -89,7 +89,7 @@ if _is_hip:
 
             _has_vllm = True
         except ImportError:
-            # Fallback: vllm not available, will use native PyTorch implementation
+            # Fallback: backend not available, will use native PyTorch implementation
             _has_vllm = False
 
 logger = logging.getLogger(__name__)
@@ -1571,7 +1571,7 @@ Raises:
 if _is_hip:
 
     def _native_dynamic_per_token_quant_fp8(output, input, scale):
-        """Native PyTorch fallback for dynamic per-token FP8 quantization when vLLM is unavailable."""
+        'Native PyTorch fallback for dynamic per-token FP8 quantization when backend is unavailable.'
         M, N = input.shape
         eps = 1e-12
         # Compute per-token scale
@@ -1584,7 +1584,7 @@ if _is_hip:
         output.copy_(output_data)
 
     def _native_dynamic_per_tensor_quant_fp8(output, input, scale):
-        """Native PyTorch fallback for dynamic per-tensor FP8 quantization when vLLM is unavailable."""
+        'Native PyTorch fallback for dynamic per-tensor FP8 quantization when backend is unavailable.'
         eps = 1e-12
         absmax = input.abs().max()
         absmax = torch.clamp(absmax, min=eps)
@@ -1596,7 +1596,7 @@ if _is_hip:
         output.copy_(output_data)
 
     def _native_static_quant_fp8(output, input, scale):
-        """Native PyTorch fallback for static FP8 quantization when vLLM is unavailable."""
+        'Native PyTorch fallback for static FP8 quantization when backend is unavailable.'
         # Use tensor directly instead of .item() to avoid CPU-GPU sync
         output_data = torch.clamp(input / scale, fp8_min, fp8_max).to(fp8_dtype)
         output.copy_(output_data)

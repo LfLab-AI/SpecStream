@@ -32,18 +32,7 @@ def _strip_special_tokens(text: str) -> str:
 
 
 class KimiK2Detector(BaseFormatDetector):
-    """
-    Detector for Kimi K2 / K2.5 model function call format.
-
-    Format Structure:
-    ```
-    <|tool_calls_section_begin|>
-    <|tool_call_begin|>functions.{func_name}:{index}<|tool_call_argument_begin|>{json_args}<|tool_call_end|>
-    <|tool_calls_section_end|>
-    ```
-
-    Reference: https://huggingface.co/moonshotai/Kimi-K2-Instruct/blob/main/docs/tool_call_guidance.md
-    """
+    '\n    Detector for Kimi K2 / K2.5 model function call format.\n\n    Format Structure:\n    ```\n    <|tool_calls_section_begin|>\n    <|tool_call_begin|>functions.{func_name}:{index}<|tool_call_argument_begin|>{json_args}<|tool_call_end|>\n    <|tool_calls_section_end|>\n    ```\n\n    Reference: [external reference omitted]\n    '
 
     def __init__(self):
         super().__init__()

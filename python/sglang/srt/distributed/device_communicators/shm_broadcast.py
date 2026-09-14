@@ -108,7 +108,7 @@ class ShmRingBuffer:
         else:
             # we are opening an existing buffer
             self.is_creator = False
-            # fix to https://stackoverflow.com/q/62748654/9191338
+            # fix to [external reference omitted]
             # Python incorrectly tracks shared memory even if it is not
             # created by the process. The following patch is a workaround.
             with patch(
@@ -204,7 +204,7 @@ class MessageQueue:
             self.local_socket = context.socket(XPUB)
             # set the verbose option so that we can receive every subscription
             # message. otherwise, we will only receive the first subscription
-            # see http://api.zeromq.org/3-3:zmq-setsockopt for more details
+            # see [external reference omitted] for more details
             self.local_socket.setsockopt(XPUB_VERBOSE, True)
             local_subscribe_port = get_open_port()
             socket_addr = f"tcp://127.0.0.1:{local_subscribe_port}"
@@ -449,7 +449,7 @@ class MessageQueue:
                 if not overflow:
                     # no need to know the size of serialized object
                     # pickle format contains the size information internally
-                    # see https://docs.python.org/3/library/pickle.html
+                    # see [external reference omitted]
                     obj = pickle.loads(buf[1:])
             if overflow:
                 recv = self.local_socket.recv()

@@ -66,7 +66,7 @@ def initialize_fp4_gemm_config(server_args: ServerArgs) -> None:
         if is_sm120_supported():
             # flashinfer_cutlass produces NaN in dense MLP layers with
             # heterogeneous batches on SM120 (Blackwell).  cudnn is stable.
-            # See: https://github.com/sgl-project/sglang/issues/20043
+            # See: [external reference omitted]
             backend = "flashinfer_cudnn"
             logger.info(
                 "SM120 (Blackwell) detected: auto-selecting "

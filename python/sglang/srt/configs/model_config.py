@@ -724,8 +724,8 @@ class ModelConfig:
         if quant_cfg is None:
             # check if is modelopt or mixed-precision model -- Both of them don't have corresponding field
             # in hf `config.json` but has a standalone `hf_quant_config.json` in the root directory
-            # example: https://huggingface.co/nvidia/Llama-3.1-8B-Instruct-FP8/tree/main
-            # example: https://huggingface.co/Barrrrry/DeepSeek-R1-W4AFP8/tree/main
+            # example: [external reference omitted]
+            # example: [external reference omitted]
             is_local = os.path.exists(self.model_path)
             if not is_local:
                 # Conditional import based on SGLANG_USE_MODELSCOPE environment variable

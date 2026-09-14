@@ -765,7 +765,7 @@ class Req(ReqDllmMixin):
         self.temp_input_token_ids_logprobs_val: Optional[List[float]] = None
         self.temp_input_token_ids_logprobs_idx: Optional[List[int]] = None
 
-        # for Spectre speculative decoding
+        # for backend speculative decoding
         self.draft_tokens: Optional[Dict[str, List[int]]] = None
         self.len_output_ids: Optional[int] = None
         self.spec_cnt: Optional[int] = 0
@@ -1056,7 +1056,7 @@ class Req(ReqDllmMixin):
 
         self.set_extend_input_len(len(self.fill_ids) - len(self.prefix_indices))
 
-    # Based on https://github.com/vllm-project/vllm/blob/7a64d24aad69e4d2548aa0bf528d9fe63428ab01/vllm/transformers_utils/detokenizer.py#L194-L313
+    # Based on [external reference omitted]
     def init_incremental_detokenize(self):
         first_iter = self.surr_offset is None or self.read_offset is None
 
@@ -1981,7 +1981,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         num_tokens = max(len_per_topk * spec_topk, spec_tokens) * len(requests)
 
-        # v2 eagle has over-allocation
+        # v2 backend has over-allocation
         return num_tokens * (1 + self.is_spec_v2)
 
     def check_decode_mem(self, selected_indices: Optional[List[int]] = None):

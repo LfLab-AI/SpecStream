@@ -805,7 +805,7 @@ class Qwen3NextModel(nn.Module):
         self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.infer_count = 0
 
-        # For EAGLE3 support
+        # For backend support
         self.layers_to_capture = []
 
     def set_eagle3_layers_to_capture(self, layers_to_capture: list[int]):
@@ -910,7 +910,7 @@ class Qwen3NextForCausalLM(nn.Module):
             use_attn_tp_group=get_global_server_args().enable_dp_lm_head,
         )
         self.logits_processor = LogitsProcessor(config)
-        # For EAGLE3 support
+        # For backend support
         self.capture_aux_hidden_states = False
 
         self._routed_experts_weights_of_layer = LazyValue(
@@ -959,7 +959,7 @@ class Qwen3NextForCausalLM(nn.Module):
         return self.model.embed_tokens.weight
 
     def set_embed(self, embed):
-        # NOTE: If draft hidden size != target hidden size, the embed weight cannot be shared for EAGLE3
+        # NOTE: If draft hidden size != target hidden size, the embed weight cannot be shared for backend
         if (
             hasattr(self.config, "target_hidden_size")
             and self.config.target_hidden_size != self.config.hidden_size
@@ -1123,7 +1123,7 @@ class Qwen3NextForCausalLM(nn.Module):
                     num_layers // 2,
                     num_layers - 3,
                 ]
-            )  # Specific layers for EAGLE3 support
+            )  # Specific layers for backend support
         else:
             self.model.set_eagle3_layers_to_capture([val + 1 for val in layer_ids])
 

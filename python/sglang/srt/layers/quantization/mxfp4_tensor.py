@@ -18,7 +18,7 @@ from typing import Optional
 import torch
 
 
-# https://github.com/NVIDIA/TensorRT-Model-Optimizer/blob/main/modelopt/torch/quantization/qtensor/mxfp4_tensor.py
+# [external reference omitted]
 class MXFP4QuantizeUtil:
     E2M1_max = 6.0
 

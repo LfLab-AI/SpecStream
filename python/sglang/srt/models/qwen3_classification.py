@@ -128,7 +128,7 @@ class Qwen3ForSequenceClassification(Qwen3ForPooledOutput):
         super().__init__(config, quant_config, prefix)
         self.score = nn.Linear(config.hidden_size, config.num_labels)
         # Use normalize=True for qwen3 embedding based on official implementation
-        # Reference: https://github.com/QwenLM/Qwen3-Embedding/blob/main/examples/qwen3_embedding_transformers.py#L55
+        # Reference: [external reference omitted]
         # Official code: output = F.normalize(output, p=2, dim=1)
         normalize = True
 

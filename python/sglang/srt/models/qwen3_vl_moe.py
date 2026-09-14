@@ -105,7 +105,7 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                 )
 
             # SGLang applies residual at the START of the next layer, not at the END like HuggingFace.
-            # See: https://github.com/huggingface/transformers/blob/v5.0.0rc0/src/transformers/models/qwen3_vl/modeling_qwen3_vl.py#L549
+            # See: [external reference omitted]
             # To match HF behavior, deepstack must be added AFTER residual: (hidden_states + residual) + deepstack
             # The order matters because addition with different tensors is not associative in practice.
             # Deepstack for prev_layer is applied at the start of current layer via post_residual_addition.

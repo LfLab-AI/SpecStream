@@ -915,7 +915,7 @@ class MiniMaxM2Model(nn.Module):
         else:
             self.norm = PPMissingLayer(return_tuple=True)
 
-        # For EAGLE3 support
+        # For backend support
         self.layers_to_capture = []
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -1028,7 +1028,7 @@ class MiniMaxM2ForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(config)
         self.pp_group = get_pp_group()
 
-        # For EAGLE3
+        # For backend
         self.capture_aux_hidden_states = False
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -1045,7 +1045,7 @@ class MiniMaxM2ForCausalLM(nn.Module):
                 2,
                 num_layers // 2,
                 num_layers - 3,
-            ]  # Specific layers for EAGLE3 support
+            ]  # Specific layers for backend support
         else:
             self.model.layers_to_capture = [val + 1 for val in layer_ids]
 

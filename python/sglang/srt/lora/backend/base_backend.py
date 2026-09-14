@@ -70,32 +70,13 @@ class BaseLoRABackend(LoRABackendLmHeadMixing):
     def run_lora_a_sgemm(
         self, x: torch.Tensor, weights: torch.Tensor, *args, **kwargs
     ) -> torch.Tensor:
-        """Run segment Gemm of lora a modules with current backend.
-        The definition of segment Gemm can be referred to https://docs.flashinfer.ai/api/gemm.html.
-
-        Args:
-             x: input matrix with shape (s, input_dim), here s is the sum of all sequence lengths
-             weights: a set of lora weights with shape (num_lora, c * r, input_dim),
-                      here r is lora rank, c is a multiplier for stacked modules (e.g., c=3 for qkv_proj, c=2 for gate_up_proj)
-                      usually input_dim is much larger than r
-        Returns:
-             result with shape (s, c * r)
-        """
+        'Run segment Gemm of lora a modules with current backend.\n        The definition of segment Gemm can be referred to [external reference omitted]\n\n        Args:\n             x: input matrix with shape (s, input_dim), here s is the sum of all sequence lengths\n             weights: a set of lora weights with shape (num_lora, c * r, input_dim),\n                      here r is lora rank, c is a multiplier for stacked modules (e.g., c=3 for qkv_proj, c=2 for gate_up_proj)\n                      usually input_dim is much larger than r\n        Returns:\n             result with shape (s, c * r)\n        '
         pass
 
     def run_lora_b_sgemm(
         self, x: torch.Tensor, weights: torch.Tensor, *args, **kwargs
     ) -> torch.Tensor:
-        """Run segment Gemm of lora b modules with current backend.
-        The definition of segment Gemm can be referred to https://docs.flashinfer.ai/api/gemm.html.
-
-        Args:
-             x: input matrix with shape (s, r), here s is the sum of all sequence lengths, r is lora rank
-             weights: a set of lora weights with shape (num_lora, output_dim, r)
-                      usually output_dim is much larger than r
-        Returns:
-             result with shape (s, output_dim)
-        """
+        'Run segment Gemm of lora b modules with current backend.\n        The definition of segment Gemm can be referred to [external reference omitted]\n\n        Args:\n             x: input matrix with shape (s, r), here s is the sum of all sequence lengths, r is lora rank\n             weights: a set of lora weights with shape (num_lora, output_dim, r)\n                      usually output_dim is much larger than r\n        Returns:\n             result with shape (s, output_dim)\n        '
         pass
 
     def run_qkv_lora(

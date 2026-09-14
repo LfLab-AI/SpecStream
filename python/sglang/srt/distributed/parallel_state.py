@@ -386,7 +386,7 @@ class GroupCoordinator:
                     # Initialize a custom quick all-reduce implementation for AMD
                     # when rocm >= gfx942. Quick reduce is designed as a
                     # complement to custom allreduce.
-                    # Based on quickreduce (https://github.com/mk1-project/quickreduce).
+                    # Based on quickreduce ([external reference omitted]).
                     if qr_rocm_arch_available():
                         self.qr_comm = QuickAllReduce(
                             group=self.cpu_group, device=self.device
@@ -852,7 +852,7 @@ class GroupCoordinator:
         input_size = input_.size()
         # NOTE: we have to use concat-style all-gather here,
         # stack-style all-gather has compatibility issues with
-        # torch.compile . see https://github.com/pytorch/pytorch/issues/138795
+        # torch.compile . see [external reference omitted]
         output_size = (input_size[0] * world_size,) + input_size[1:]
         # Allocate output tensor.
         with self.use_symmetric_memory(
@@ -1655,7 +1655,7 @@ def init_distributed_environment(
         except ImportError as e:
             raise ImportError(
                 "Please install mooncake by following the instructions at "
-                "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
+                "[dependency documentation] "  # noqa: E501
                 "to run SGLang with Mooncake Backend."
             ) from e
         mooncake_ep.set_host_ip(get_local_ip_auto())
@@ -1688,7 +1688,7 @@ def init_distributed_environment(
 
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
-    # see https://github.com/pytorch/pytorch/issues/122816
+    # see [external reference omitted]
     if local_rank == -1:
         # local rank not set, this usually happens in single-node
         # setting, where we can use rank as local rank
@@ -2297,7 +2297,7 @@ def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:
                     recv, src=ranks[source_rank], group=pg
                 )
                 name = recv[0]
-                # fix to https://stackoverflow.com/q/62748654/9191338
+                # fix to [external reference omitted]
                 # Python incorrectly tracks shared memory even if it is not
                 # created by the process. The following patch is a workaround.
                 with patch(

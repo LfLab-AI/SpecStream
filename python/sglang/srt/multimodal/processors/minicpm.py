@@ -224,7 +224,7 @@ class MiniCPMMultimodalProcessor(BaseMultimodalProcessor):
                 f"{len(pixel_values)} vs. {len(tgt_sizes)}"
             )
 
-        # Track slices per image (like vLLM's num_slices)
+        # Track slices per image (like backend's num_slices)
         slices_per_image: List[int] = []
         pixel_values_flat: List[torch.Tensor] = []
         tgt_sizes_flat: List[torch.Tensor] = []

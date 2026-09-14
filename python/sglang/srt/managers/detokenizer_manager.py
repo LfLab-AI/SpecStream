@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 # Maximum number of request states that detokenizer can hold. When exceeded,
 # oldest request states will be evicted. Default: 65536 (1<<16).
-# For more details, see: https://github.com/sgl-project/sglang/issues/2812
+# For more details, see: [external reference omitted]
 # Use power of 2 values for better memory allocation.
 DETOKENIZER_MAX_STATES = int(os.environ.get("SGLANG_DETOKENIZER_MAX_STATES", 1 << 16))
 
@@ -289,7 +289,7 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
                     "Please increase the maximum number of requests by setting "
                     "the SGLANG_DETOKENIZER_MAX_STATES environment variable to a bigger value than the default value. "
                     f"The current value is {DETOKENIZER_MAX_STATES}. "
-                    "For more details, see: https://github.com/sgl-project/sglang/issues/2812"
+                    "For more details, see: [dependency documentation]"
                 )
             new_text = read_texts[i][len(surr_texts[i]) :]
             if recv_obj.finished_reasons[i] is None:

@@ -446,6 +446,7 @@ class _FakeGrantRuntime:
 
 def _target_runtime_for_observation(observation):
     runtime = SpecStreamTargetRuntime.__new__(SpecStreamTargetRuntime)
+    runtime.tp_window_mailbox = None
     runtime.config = SimpleNamespace(pcie_slack_coexec=True)
     runtime._round_id = observation.round_id
     runtime._h2d_grant_window_ids = {}

@@ -1,0 +1,18 @@
+Third party notices
+
+This distribution contains modified SGLang runtime code. Existing file-level
+copyright, license, and source-attribution notices remain applicable. The root
+LICENSE applies as specified by the upstream distribution; retaining or cleaning
+documentation does not transfer authorship of third-party implementations.
+
+The original SGLang README acknowledged code reuse from Guidance, vLLM,
+LightLLM, FlashInfer, Outlines, and LMQL. Those acknowledgments are retained here.
+
+The SM-control sources under csrc/specstream_smctrl were vendored from
+zejia-lin/BulletServe commit 445afae2abc15d578d3107d37a9b57ebc49e5e46, which
+credits Joshua Bakita and James H. Anderson's libsmctrl work. Their original
+source copyright notices are retained.
+
+This release changes distribution documentation, removes local experiment
+artifacts, and provides portable build and smoke-test entry points. It does not
+claim third-party runtime or model implementations as new SpecStream methods.

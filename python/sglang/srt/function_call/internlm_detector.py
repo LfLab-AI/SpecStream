@@ -1,4 +1,4 @@
-# modified from https://github.com/InternLM/lmdeploy/blob/main/lmdeploy/serve/openai/tool_parser/internlm2_parser.py
+# modified from [external reference omitted]
 
 import json
 import logging

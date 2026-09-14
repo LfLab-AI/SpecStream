@@ -1,7 +1,4 @@
-"""
-Torch-native implementation for FusedMoE. This is used for torch.compile.
-It is based on https://github.com/pytorch-labs/gpt-fast/blob/32971d3129541c5bfb4f715abc33d1c5f408d204/mixtral-moe/model.py#L204
-"""
+'\nTorch-native implementation for FusedMoE. This is used for torch.compile.\nIt is based on [external reference omitted]\n'
 
 import torch
 from torch.nn import functional as F
@@ -58,7 +55,7 @@ def moe_forward_native(
 
     topk_weights, topk_ids, _ = topk_output
 
-    # Ref code from https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/e0828e3cc0a03408724b80c3cc92c8e072db8d01/modeling_deepseek.py#L589
+    # Ref code from [external reference omitted]
     len_experts = layer.num_experts
 
     cnts = topk_ids.new_zeros((topk_ids.shape[0], len_experts))

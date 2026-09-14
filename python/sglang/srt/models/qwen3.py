@@ -490,7 +490,7 @@ class Qwen3ForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(config)
         self.pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
 
-        # For EAGLE3 support
+        # For backend support
         self.capture_aux_hidden_states = False
 
     def get_input_embeddings(self) -> nn.Embedding:
@@ -682,7 +682,7 @@ class Qwen3ForCausalLM(nn.Module):
                 2,
                 num_layers // 2,
                 num_layers - 3,
-            ]  # Specific layers for EAGLE3 support
+            ]  # Specific layers for backend support
         else:
             self.model.layers_to_capture = [val + 1 for val in layer_ids]
 

@@ -1361,7 +1361,7 @@ class AscendAttnBackend(AttentionBackend):
             # capture
             actual_seq_lengths_kv = self.forward_metadata.seq_lens_cpu_list
         else:
-            # eagle
+            # backend
             actual_seq_lengths_kv = (
                 self.forward_metadata.seq_lens_cpu_int.cpu().int().tolist()
             )

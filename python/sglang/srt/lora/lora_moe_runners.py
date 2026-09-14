@@ -112,16 +112,7 @@ class LoRAInfo:
 
 
 class TritonRunnerCoreWithLoRA(TritonRunnerCore):
-    """
-    LoRA-aware wrapper around TritonRunnerCore.
-
-    Integrates LoRA deltas at the correct points in the MoE forward pass:
-    1. Base gate_up projection + LoRA gate_up delta -> activation
-    2. Base down projection + LoRA down delta -> final reduction
-
-    This follows the vLLM/HF approach where LoRA is fused into the computation
-    rather than computed independently.
-    """
+    '\n    LoRA-aware wrapper around TritonRunnerCore.\n\n    Integrates LoRA deltas at the correct points in the MoE forward pass:\n    1. Base gate_up projection + LoRA gate_up delta -> activation\n    2. Base down projection + LoRA down delta -> final reduction\n\n    This follows the backend/HF approach where LoRA is fused into the computation\n    rather than computed independently.\n    '
 
     def __init__(self, config: MoeRunnerConfig):
         super().__init__(config)

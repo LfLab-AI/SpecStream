@@ -777,7 +777,7 @@ def flash_decode_sparse_attention_fwd(
 
 
 # Extend attention kernel for Double Sparsity
-# Moved from https://github.com/sgl-project/sglang/blob/v0.4.2.post1/python/sglang/srt/layers/attention/triton_ops/extend_attention.py
+# Moved from [external reference omitted]
 @triton.jit
 def _fwd_kernel(
     Q_Extend,

@@ -290,9 +290,9 @@ class TpModelWorker(BaseTpWorker):
         self.specstream_draft_stream = None
         self.specstream_smctrl = None
         self._last_specstream_draft_tpc_range = None
-        # A remote SPECTRE Drafter is a normal TpModelWorker whose role is
-        # selected by --spectre-role draft.  ``is_draft_worker`` instead marks
-        # an in-process EAGLE/MTP draft model and is false for this server.
+        # A remote backend Drafter is a normal TpModelWorker whose role is
+        # selected by --backend-role draft.  ``is_draft_worker`` instead marks
+        # an in-process backend/MTP draft model and is false for this server.
         # Using that flag here skipped libsmctrl initialization until the first
         # grant attempted to apply a mask.
         if should_initialize_drafter_smctrl(server_args):

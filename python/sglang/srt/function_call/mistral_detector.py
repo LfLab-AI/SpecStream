@@ -16,20 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class MistralDetector(BaseFormatDetector):
-    """
-    Detector for Mistral tool/function call formats.
-
-    Supported formats:
-
-    1) JSON-array format:
-       `[TOOL_CALLS] [{"name": "...", "arguments": {...}}, ...]`
-
-    2) Compact format (common in newer templates/models, especially in streaming):
-       `[TOOL_CALLS]tool_name[ARGS]{...}`
-       (also tolerates missing delimiters like `]` after `[TOOL_CALLS` and/or `[ARGS]` while streaming)
-
-    Reference: https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3?chat_template=default
-    """
+    '\n    Detector for Mistral tool/function call formats.\n\n    Supported formats:\n\n    1) JSON-array format:\n       `[TOOL_CALLS] [{"name": "...", "arguments": {...}}, ...]`\n\n    2) Compact format (common in newer templates/models, especially in streaming):\n       `[TOOL_CALLS]tool_name[ARGS]{...}`\n       (also tolerates missing delimiters like `]` after `[TOOL_CALLS` and/or `[ARGS]` while streaming)\n\n    Reference: [external reference omitted]\n    '
 
     def __init__(self):
         """Initialize tokens and streaming state."""

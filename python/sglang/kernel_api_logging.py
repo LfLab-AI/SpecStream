@@ -1,8 +1,4 @@
-"""Kernel API crash debugging helpers for SGLang.
-
-This module was developed with reference to FlashInfer's kernel API logging utility:
-https://github.com/flashinfer-ai/flashinfer/blob/main/flashinfer/api_logging.py
-"""
+"Kernel API crash debugging helpers for SGLang.\n\nThis module was developed with reference to FlashInfer's kernel API logging utility:\n[external reference omitted]\n"
 
 from __future__ import annotations
 

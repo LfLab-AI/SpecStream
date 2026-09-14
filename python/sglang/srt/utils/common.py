@@ -101,7 +101,7 @@ logger = logging.getLogger(__name__)
 torch_release = pkg_version.parse(torch.__version__).release
 
 
-# https://pytorch.org/docs/stable/notes/hip.html#checking-for-hip
+# [external reference omitted]
 @lru_cache(maxsize=1)
 def is_hip() -> bool:
     return torch.version.hip is not None
@@ -1149,7 +1149,7 @@ def configure_logger(server_args, prefix: str = ""):
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
-# source: https://github.com/vllm-project/vllm/blob/93b38bea5dd03e1b140ca997dfaadef86f8f1855/vllm/lora/utils.py#L9
+# source: [external reference omitted]
 def replace_submodule(
     model: nn.Module, module_name: str, new_module: nn.Module
 ) -> nn.Module:
@@ -1314,7 +1314,7 @@ def set_prometheus_multiproc_dir():
     # Set prometheus multiprocess directory
     # sglang uses prometheus multiprocess mode
     # we need to set this before importing prometheus_client
-    # https://prometheus.github.io/client_python/multiprocess/
+    # [external reference omitted]
     global prometheus_multiproc_dir
 
     if "PROMETHEUS_MULTIPROC_DIR" in os.environ:
@@ -1426,7 +1426,7 @@ def add_prometheus_track_response_middleware(app):
                 routing_keys_active.dec(routing_key)
 
 
-# https://github.com/blueswen/fastapi-observability/blob/132a3c576f8b09e5311c68bd553215013bc75685/fastapi_app/utils.py#L98
+# [external reference omitted]
 def _get_fastapi_request_path(request) -> Tuple[str, bool]:
     from starlette.routing import Match
 
@@ -1693,8 +1693,8 @@ def get_device_memory_capacity(device: str = None):
 
 
 # Copy from pytorch and OpenRLHF to allow creating multiple main groups.
-# https://github.com/pytorch/pytorch/blob/main/torch/distributed/distributed_c10d.py
-# https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/utils/distributed_util.py
+# [external reference omitted]
+# [external reference omitted]
 def init_custom_process_group(
     backend=None,
     init_method=None,
@@ -1744,7 +1744,7 @@ def init_custom_process_group(
         store = PrefixStore(group_name, store)
 
     # NOTE: The pg_options parameter was renamed into backend_options in PyTorch 2.6.0
-    # https://github.com/pytorch/pytorch/commit/a0c7029a75628cd5fa8df83c0de0ea98ee7fd844
+    # [external reference omitted]
     # We need to determine the appropriate parameter name based on PyTorch version
     pg_options_param_name = (
         "backend_options" if torch_release >= (2, 6) else "pg_options"
@@ -1947,28 +1947,7 @@ def direct_register_custom_op(
     fake_impl: Optional[Callable] = None,
     target_lib: Optional[Library] = None,
 ) -> None:
-    """
-    NOTE: Please try to use `register_custom_op` instead of this function.
-    See `python/sglang/srt/utils/custom_op.py` for details.
-
-    `torch.library.custom_op` can have significant overhead because it
-    needs to consider complicated dispatching logic. This function
-    directly registers a custom op and dispatches it to the CUDA backend.
-    See https://gist.github.com/youkaichao/ecbea9ec9fc79a45d2adce1784d7a9a5
-    for more details.
-
-    By default, the custom op is registered to the vLLM library. If you
-    want to register it to a different library, you can pass the library
-    object to the `target_lib` argument.
-
-    IMPORTANT: the lifetime of the operator is tied to the lifetime of the
-    library object. If you want to bind the operator to a different library,
-    make sure the library object is alive when the operator is used.
-
-    Note: This function will silently skip registration if the operator
-    with the same name is already registered to avoid RuntimeError in
-    multi-engine scenarios (e.g., VERL framework).
-    """
+    '\n    NOTE: Please try to use `register_custom_op` instead of this function.\n    See `python/sglang/srt/utils/custom_op.py` for details.\n\n    `torch.library.custom_op` can have significant overhead because it\n    needs to consider complicated dispatching logic. This function\n    directly registers a custom op and dispatches it to the CUDA backend.\n    See [external reference omitted]\n    for more details.\n\n    By default, the custom op is registered to the backend library. If you\n    want to register it to a different library, you can pass the library\n    object to the `target_lib` argument.\n\n    IMPORTANT: the lifetime of the operator is tied to the lifetime of the\n    library object. If you want to bind the operator to a different library,\n    make sure the library object is alive when the operator is used.\n\n    Note: This function will silently skip registration if the operator\n    with the same name is already registered to avoid RuntimeError in\n    multi-engine scenarios (e.g., VERL framework).\n    '
     import torch.library
 
     my_lib = target_lib or sglang_lib
@@ -1998,7 +1977,7 @@ def direct_register_custom_op(
     try:
         my_lib.define(op_name + schema_str)
         if is_npu():
-            # https://github.com/sgl-project/sglang/pull/12287/files#r2499583982
+            # [external reference omitted]
             my_lib.impl(op_name, op_func, "PrivateUse1")
         elif is_xpu():
             my_lib.impl(op_name, op_func, "XPU")
@@ -2332,7 +2311,7 @@ class UvicornAccessLogFilter(logging.Filter):
         # Strip query string for matching
         path = str(path)
         # Some proxies/clients may emit absolute-form request-target in logs:
-        # e.g. "GET https://example.com/metrics HTTP/1.1" -> extract "/metrics".
+        # e.g. "GET [external reference omitted] HTTP/1.1" -> extract "/metrics".
         if "://" in path:
             try:
                 path = urlparse(path).path or path
@@ -3737,7 +3716,7 @@ def reserve_rope_cache_for_long_sequences(
     reserve_rope_cache_recursive(model)
 
 
-# Copy from: https://github.com/deepseek-ai/DeepGEMM/blob/main/deep_gemm/utils.py
+# Copy from: [external reference omitted]
 def calc_diff(x, y):
     x, y = x.double(), y.double()
     denominator = (x * x + y * y).sum()

@@ -131,7 +131,7 @@ class _NixlEPDispatcherImplBase:
         if not use_nixl:
             raise ImportError(
                 "NixlEP is not installed. Please install NixlEP package from "
-                "https://github.com/ai-dynamo/nixl."
+                "[dependency documentation]"
             )
 
         self.group = group
@@ -202,7 +202,7 @@ class _NixlEPDispatcherImpl(_NixlEPDispatcherImplBase):
 
         """
         num_max_dispatch_tokens_per_rank: the actual batch size in the decoding engine should be less than 256
-        https://github.com/ai-dynamo/nixl
+        [dependency documentation]
         """
         self.return_recv_hook = return_recv_hook
         self.device_module = torch.get_device_module()

@@ -55,7 +55,7 @@ def _chunk_cumsum_fwd_kernel(
     pid_b = tl.program_id(axis=0)
 
     # if dt is long, may cause problems, so use 64 bit
-    # https://github.com/triton-lang/triton/issues/1058
+    # [external reference omitted]
     pid_c = tl.program_id(axis=1).to(tl.int64)
     pid_h = tl.program_id(axis=2)
     dt_ptr += pid_b * stride_dt_batch + pid_c * chunk_size * stride_dt_seqlen

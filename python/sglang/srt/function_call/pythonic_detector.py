@@ -17,19 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class PythonicDetector(BaseFormatDetector):
-    """
-    Detector for Llama-4 models with Pythonic tool call format.
-
-    The Pythonic format uses Python function call syntax within square brackets,
-    with arguments as Python literals rather than JSON.
-
-    Format Structure:
-    ```
-    [tool1(arg1=val1, arg2=val2), tool2(arg1=val3)]
-    ```
-
-    Reference: https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct?chat_template=default
-    """
+    '\n    Detector for Llama-4 models with Pythonic tool call format.\n\n    The Pythonic format uses Python function call syntax within square brackets,\n    with arguments as Python literals rather than JSON.\n\n    Format Structure:\n    ```\n    [tool1(arg1=val1, arg2=val2), tool2(arg1=val3)]\n    ```\n\n    Reference: [external reference omitted]\n    '
 
     def __init__(self):
         super().__init__()

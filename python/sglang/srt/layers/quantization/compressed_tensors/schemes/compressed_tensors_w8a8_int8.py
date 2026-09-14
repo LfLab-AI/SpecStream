@@ -155,7 +155,7 @@ class CompressedTensorsW8A8Int8(CompressedTensorsLinearScheme):
         # It does not depend on scales or azp, so it is the same for
         # static and dynamic quantization.
         # For more details, see csrc/quantization/cutlass_w8a8/Epilogues.md
-        # https://github.com/vllm-project/vllm/blob/8d59dbb00044a588cab96bcdc028006ed922eb06/csrc/quantization/cutlass_w8a8/Epilogues.md
+        # [external reference omitted]
         if not self.input_symmetric:
             weight = layer.weight
             azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.int32)

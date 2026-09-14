@@ -1337,7 +1337,7 @@ class HiRadixCache(RadixCache):
             return InsertResult(prefix_len=0)
 
         if self.is_eagle and value is not None:
-            # Make sure the value len equal to the EAGLE bigram key len
+            # Make sure the value len equal to the backend bigram key len
             value = value[: len(key)]
 
         node = self.root_node

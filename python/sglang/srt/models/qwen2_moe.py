@@ -622,7 +622,7 @@ class Qwen2MoeModel(nn.Module):
         else:
             self.norm = PPMissingLayer(return_tuple=True)
 
-        # For EAGLE3 support
+        # For backend support
         self.layers_to_capture = []
 
     def set_eagle3_layers_to_capture(self, layers_to_capture: List[int]):
@@ -751,7 +751,7 @@ class Qwen2MoeForCausalLM(nn.Module):
             use_attn_tp_group=get_global_server_args().enable_dp_lm_head,
         )
         self.logits_processor = LogitsProcessor(config)
-        # For EAGLE3 support
+        # For backend support
         self.capture_aux_hidden_states = False
 
     @torch.no_grad()
@@ -938,7 +938,7 @@ class Qwen2MoeForCausalLM(nn.Module):
                     num_layers // 2,
                     num_layers - 3,
                 ]
-            )  # Specific layers for EAGLE3 support
+            )  # Specific layers for backend support
         else:
             self.model.set_eagle3_layers_to_capture([val + 1 for val in layer_ids])
 

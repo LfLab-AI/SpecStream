@@ -24,7 +24,7 @@ def adapt_config_dict(
     )
     is_eagle = "eagle" in model.lower()
     if is_eagle and not is_moe:
-        # Dense EAGLE draft model (e.g. Mistral Small 4 EAGLE).
+        # Dense backend draft model (e.g. Mistral Small 4 backend).
         # Uses MLA attention like MistralLarge3 but has no MoE layers.
         # Set model_type to deepseek_v3 for MLA support, and override
         # MoE fields so all layers are dense.

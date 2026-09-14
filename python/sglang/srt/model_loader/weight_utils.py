@@ -256,7 +256,7 @@ def get_quant_config(
         ):
             quant_algo = config["quantization"]["quant_algo"]
             if quant_algo is None:
-                # (yizhang2077) workaround for nvidia/Llama-4-Maverick-17B-128E-Eagle3
+                # (yizhang2077) workaround for nvidia/Llama-4-Maverick-17B-128E-backend
                 if model_config.hf_config.architectures[0] != "LlamaForCausalLMEagle3":
                     raise ValueError(
                         f"Invalid quant_config, quantization method: {model_config.quantization},"
@@ -633,11 +633,7 @@ def maybe_add_mtp_safetensors(
 
 
 def filter_files_not_needed_for_inference(hf_weights_files: List[str]) -> List[str]:
-    """
-    Exclude files that are not needed for inference.
-
-    See https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
-    """
+    '\n    Exclude files that are not needed for inference.\n\n    See [external reference omitted]\n    '
     blacklist = [
         "training_args.bin",
         "optimizer.bin",

@@ -256,7 +256,7 @@ class OpenAIServingResponses(OpenAIServingChat):
                         if hasattr(self.tokenizer_manager.model_config, "context_len")
                         else 4096
                     )
-                    # Account for reserved tokens (e.g., EAGLE speculative decoding slots)
+                    # Account for reserved tokens (e.g., backend speculative decoding slots)
                     # that the tokenizer_manager adds during validation
                     num_reserved_tokens = self.tokenizer_manager.num_reserved_tokens
                     default_max_tokens = max(

@@ -522,7 +522,7 @@ class SchedulerSpectreTargetMixin:
                     keys, deadline_us=grant_deadline_us
                 )
             else:
-                # Preserve SPECTRE's pipeline: while Target verifies round n,
+                # Preserve backend's pipeline: while Target verifies round n,
                 # every ACK can unlock one more token for round n+1.  The
                 # runtime reuses the original absolute PCIe-slack window, so
                 # ACKs never restart or extend the overlap budget.
