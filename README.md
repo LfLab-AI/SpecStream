@@ -28,9 +28,6 @@ running at tensor-parallel size 2 on the same devices.
 | SGLang base | 0.5.17 |
 | GPU architecture | SM80 |
 
-The examples below use a local Qwen3-32B Target and Qwen3-0.6B Draft. Set the
-model paths, GPU selection, and memory settings for your deployment. The startup
-script checks the pair's token mappings, special tokens, and chat templates.
 
 ## Installation and compilation
 
@@ -88,16 +85,14 @@ CUDA MPS session, and loads Target followed by Draft. When it prints
 terminal. Press Ctrl-C in the first terminal to stop the pair and its MPS session.
 Server commands, profiles, and logs are saved under `outputs/server_*`.
 
-This example uses a fixed Draft quota of 34 TPCs on each A800. Runtime admission
+Runtime admission
 and verification-width selection remain active. Set `DRAFT_TPCS` to the quota
 chosen for your GPU and model pair. The global mask applies to the separate
 Draft processes.
 
-The launcher's defaults are a 16,384-token context, 65,536 Target KV tokens,
-131,072 Draft KV tokens, and a 32 GB host-history budget per Target worker.
 Override `CONTEXT_LENGTH`, `TARGET_KV_TOKENS`, `DRAFT_KV_TOKENS`, and
 `CPU_MEMORY_GB` as needed. `TARGET_MEM_FRACTION` and `DRAFT_MEM_FRACTION` set the
-per-process memory ceilings, with defaults of 0.55 and 0.80.
+per-process memory ceilings.
 `TARGET_PORT`, `DRAFT_PORT`, and `ZMQ_PORT` default to 30000, 30001, and 5557;
 use `--base-url` in the evaluation command when changing the Target port.
 
@@ -122,10 +117,6 @@ python scripts/specstream/evaluate.py run \
 cat "$TEST_ROOT/synthetic_run/summary.json"
 ```
 
-This sends 16 requests with 12,288 input tokens each and generates exactly 128
-tokens per request at concurrency 4. One warmup request precedes measurement.
-A completed run reports `completed: 16`, `errors: 0`, and
-`output_tokens: 2048`, and creates `complete.marker`.
 
 ### 3. Test on GSM8K
 
@@ -146,9 +137,6 @@ python scripts/specstream/evaluate.py run \
 cat "$TEST_ROOT/gsm8k_run/summary.json"
 ```
 
-Data preparation downloads the dataset on the machine running the command.
-For an offline server, add `--source /path/to/gsm8k_main_test.jsonl` to the
-preparation command. Each source row contains `question` and `answer`.
 
 ### 4. Test on LongBench v2
 
@@ -170,10 +158,6 @@ python scripts/specstream/evaluate.py run \
 cat "$TEST_ROOT/longbench_run/summary.json"
 ```
 
-For local data, add `--source /path/to/longbench_v2.jsonl`. The source uses the
-dataset's original fields: `_id`, `context`, `question`, `choice_A` through
-`choice_D`, and `answer`. Both public-data loaders also accept a JSON array,
-a Parquet file, or a directory created by `datasets.save_to_disk`.
 
 ### 5. Read the outputs
 
@@ -189,20 +173,6 @@ vocabulary hash. Each run writes:
 
 Throughput is generated tokens divided by the measured batch wall time,
 including prefill and queueing. Request latency covers submission through the
-full response. Warmup is excluded from both measurements. Public-data runs
-stop at EOS or the output limit, so their generated token counts vary.
-Accuracy uses all selected questions as its denominator. GSM8K extracts the
-final number; LongBench v2 matches the returned choice letter. These examples
-use zero-shot prompts and disable optional thinking in the chat template.
-
-Reuse a prepared workload to compare configurations on identical inputs.
-For a new run, choose a fresh output directory. All generated files in these
-examples stay under the ignored `outputs/` directory.
-
-Component checks are also available:
-
-```bash
-bash scripts/specstream/smoke_test.sh --gpu
-PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}" \
+full response.
   python -m pytest -q python/sglang/test/spectre_specstream
 ```
