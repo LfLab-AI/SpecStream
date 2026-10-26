@@ -1,6 +1,5 @@
 # SpecStream
 
-**Due to an oversight on our part when changing the source repository from public to private, file contents in the anonymous repository may have been inaccessible between September 27 and October 10. We identified and resolved the issue during a subsequent check, and access has now been restored. We sincerely apologize for any inconvenience this may have caused during your review of our code.**
 
 ## Method overview
 
