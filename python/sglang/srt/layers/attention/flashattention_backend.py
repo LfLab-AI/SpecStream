@@ -19,6 +19,9 @@ from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.spec_info import SpecInput
+from sglang.srt.speculative.spectre.drafter.important_history import (
+    observe_prefill_importance,
+)
 from sglang.srt.utils import get_compiler_backend
 
 if TYPE_CHECKING:
@@ -173,6 +176,11 @@ class FlashAttentionBackend(AttentionBackend):
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
         self.flash_attn_with_kvcache = flash_attn_with_kvcache
+        self.cpu_draft_backend = None
+        if getattr(model_runner.token_to_kv_pool, "cpu_draft_history", None) is not None:
+            from sglang.srt.speculative.spectre.drafter.cpu_draft_backend import CpuDraftBackend
+
+            self.cpu_draft_backend = CpuDraftBackend(model_runner, flash_attn_varlen_func)
 
         # If num_splits == 0, we use a heuristic to automatically determine the number of splits.
         # We set nums splits to 1 if deterministic inference is enabled.
@@ -190,10 +198,18 @@ class FlashAttentionBackend(AttentionBackend):
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         """Initialize forward metadata hence all layers in the forward pass can reuse it."""
+        if self.cpu_draft_backend is not None:
+            self.cpu_draft_backend.prepare(forward_batch)
+            return
         metadata = FlashAttentionMetadata()
         seqlens_in_batch = forward_batch.seq_lens
         batch_size = forward_batch.batch_size
         device = seqlens_in_batch.device
+        target_spill = getattr(forward_batch.token_to_kv_pool, "native_target_spill", None)
+        if target_spill is not None and target_spill.active and not forward_batch.forward_mode.is_idle():
+            metadata.native_target_spill_plan = target_spill.prepare(metadata, forward_batch)
+            self.forward_metadata = metadata
+            return
 
         # Sealed SpecStream History slots are deliberately tombstoned in the
         # normal page table.  Its verifier builds History/Tail metadata itself.
@@ -529,6 +545,11 @@ class FlashAttentionBackend(AttentionBackend):
                 )
                 self.forward_metadata_spec_decode_expand.page_table = expand_page_table
 
+        pressure = getattr(forward_batch.token_to_kv_pool, "native_draft_spill", None)
+        if pressure is not None and pressure.active:
+            metadata.native_draft_spill_plan = pressure.prepare(
+                metadata, forward_batch, self.speculative_step_id, self.speculative_num_steps,
+            )
         self.forward_metadata = metadata
 
     def forward_extend(
@@ -544,6 +565,18 @@ class FlashAttentionBackend(AttentionBackend):
         k_rope: Optional[torch.Tensor] = None,
         sinks: Optional[torch.Tensor] = None,
     ):
+        if self.cpu_draft_backend is not None:
+            return self.cpu_draft_backend.forward(q, k, v, layer, forward_batch, save_kv_cache)
+        target_plan = getattr(self.forward_metadata, "native_target_spill_plan", None)
+        if target_plan is not None:
+            return forward_batch.token_to_kv_pool.native_target_spill.forward(
+                self, self.forward_metadata, target_plan, q, k, v, layer, save_kv_cache,
+            )
+        plan = getattr(self.forward_metadata, "native_draft_spill_plan", None)
+        if plan is not None:
+            return forward_batch.token_to_kv_pool.native_draft_spill.forward(
+                self, self.forward_metadata, plan, q, k, v, layer, save_kv_cache,
+            )
         if k is not None:
             assert v is not None
 
@@ -688,6 +721,14 @@ class FlashAttentionBackend(AttentionBackend):
             # Do multi-head attention
             key_cache, value_cache = forward_batch.token_to_kv_pool.get_kv_buffer(
                 layer.layer_id
+            )
+
+            # Opt-in read-only scoring of Draft-owned, already RoPE-encoded KV.
+            # The bounded scheduler activates it only around complete bootstrap
+            # prefill and publishes its result before the first cache prune.
+            observe_prefill_importance(
+                q=q, key_cache=key_cache, layer=layer, forward_batch=forward_batch,
+                save_kv_cache=save_kv_cache, causal=causal, attention_sinks=sinks,
             )
 
             key_cache = key_cache.view(
@@ -945,6 +986,18 @@ class FlashAttentionBackend(AttentionBackend):
         k_rope: Optional[torch.Tensor] = None,
         sinks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.cpu_draft_backend is not None:
+            return self.cpu_draft_backend.forward(q, k, v, layer, forward_batch, save_kv_cache)
+        target_plan = getattr(self.forward_metadata, "native_target_spill_plan", None)
+        if target_plan is not None:
+            return forward_batch.token_to_kv_pool.native_target_spill.forward(
+                self, self.forward_metadata, target_plan, q, k, v, layer, save_kv_cache,
+            )
+        plan = getattr(self.forward_metadata, "native_draft_spill_plan", None)
+        if plan is not None:
+            return forward_batch.token_to_kv_pool.native_draft_spill.forward(
+                self, self.forward_metadata, plan, q, k, v, layer, save_kv_cache,
+            )
         if k is not None:
             assert v is not None
             if save_kv_cache:

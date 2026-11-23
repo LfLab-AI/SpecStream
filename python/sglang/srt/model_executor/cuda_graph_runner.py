@@ -716,6 +716,12 @@ class CudaGraphRunner:
         return self.num_tokens_per_bs
 
     def can_run(self, forward_batch: ForwardBatch):
+        if (
+            self.model_runner.spec_algorithm.is_standalone()
+            and forward_batch.forward_mode == ForwardMode.TARGET_VERIFY
+            and forward_batch.spec_info.draft_token_num != self.num_tokens_per_bs
+        ):
+            return False
         actual_ntpb = self._get_actual_ntpb(forward_batch)
 
         if self.require_mlp_tp_gather:

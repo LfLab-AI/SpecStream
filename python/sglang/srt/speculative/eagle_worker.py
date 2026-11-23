@@ -1,5 +1,13 @@
+import json
+import json
+import os
+import threading
+from pathlib import Path
+from queue import SimpleQueue
 import logging
+import os
 import time
+from contextlib import nullcontext
 from typing import List, Optional, Tuple
 
 import torch
@@ -31,6 +39,7 @@ from sglang.srt.model_executor.forward_batch_info import (
 )
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.draft_utils import DraftBackendFactory
+from sglang.srt.speculative.native_dynamic_q import NativeDynamicWidth
 from sglang.srt.speculative.eagle_draft_cuda_graph_runner import (
     EAGLEDraftCudaGraphRunner,
 )
@@ -74,6 +83,66 @@ if is_cuda():
     from sgl_kernel import segment_packbits  # noqa: F401
 
 logger = logging.getLogger(__name__)
+
+
+_NATIVE_DRAFT_TRACE_PATH = os.getenv("SPECSTREAM_NATIVE_DRAFT_TRACE")
+
+
+class _NativeDraftTrace:
+    """Read timing events on a separate thread after the GPU has completed them."""
+
+    def __init__(self, path, rank):
+        path = Path(path)
+        if "{rank}" in str(path):
+            path = Path(str(path).replace("{rank}", str(rank)))
+        else:
+            path = path.with_name(f"{path.stem}.tp{rank}{path.suffix}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.stream = path.open("a", buffering=1, encoding="utf-8")
+        self.rank = rank
+        self.rows = SimpleQueue()
+        self.round_id = 0
+        threading.Thread(target=self._write, daemon=True).start()
+
+    @staticmethod
+    def start():
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        return event, time.perf_counter()
+
+    @staticmethod
+    def stop(start):
+        host_ms = (time.perf_counter() - start[1]) * 1000
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        return start[0], event, host_ms
+
+    def enqueue(self, timestamp, batch_size, q, proposal, extend):
+        self.round_id += 1
+        self.rows.put((self.round_id, timestamp, batch_size, q, proposal, extend))
+
+    def _write(self):
+        while True:
+            round_id, timestamp, batch_size, q, proposal, extend = self.rows.get()
+            last_event = (extend or proposal)[1]
+            while not last_event.query():
+                time.sleep(0.005)
+            proposal_ms = proposal[0].elapsed_time(proposal[1])
+            extend_ms = extend[0].elapsed_time(extend[1]) if extend else 0.0
+            extend_host_ms = extend[2] if extend else 0.0
+            self.stream.write(json.dumps(dict(
+                round_id=round_id,
+                timestamp=timestamp,
+                tp_rank=self.rank,
+                batch_size=batch_size,
+                q=q,
+                proposal_device_ms=proposal_ms,
+                extend_device_ms=extend_ms,
+                draft_device_ms=proposal_ms + extend_ms,
+                proposal_host_ms=proposal[2],
+                extend_host_ms=extend_host_ms,
+                draft_host_ms=proposal[2] + extend_host_ms,
+            )) + "\n")
 
 
 class EAGLEWorker(TpModelWorker):
@@ -277,6 +346,77 @@ class EAGLEWorker(TpModelWorker):
         return self.model_runner
 
     def forward_batch_generation(self, batch: ScheduleBatch) -> GenerationBatchResult:
+        dynamic_width = (
+            os.getenv("SPECSTREAM_NATIVE_DYNAMIC_Q") == "1"
+            and self.speculative_algorithm.is_standalone()
+            and batch.forward_mode.is_decode()
+            and not batch.is_extend_in_batch
+        )
+        if not dynamic_width:
+            return self._forward_speculative_batch(batch)
+
+        if (
+            self.topk != 1
+            or self.page_size != 1
+            or self.speculative_num_draft_tokens != 8
+            or self.server_args.enable_dp_attention
+            or not self.server_args.disable_overlap_schedule
+        ):
+            raise ValueError("Native dynamic q requires ordinary topk=1, page_size=1 STANDALONE with max q=8")
+
+        policy = getattr(self, "_native_dynamic_policy", None)
+        if policy is None:
+            self._native_dynamic_policy = policy = NativeDynamicWidth()
+            self._native_dynamic_backends = {}
+        size = batch.batch_size()
+        width = policy.choose(size) if self.tp_rank == 0 else None
+        width = self.target_worker.model_runner.tp_group.broadcast_object(width, src=0)
+        self._native_realized_q = width
+
+        original_backend = self.draft_attn_backend
+        if width != 8:
+            backends = self._native_dynamic_backends
+            if width not in backends:
+                backends[width] = DraftBackendFactory(
+                    self.server_args, self.draft_model_runner, self.topk, width - 1
+                ).create_decode_backend()
+            self.draft_attn_backend = backends[width]
+            self.draft_model_runner.draft_attn_backend = self.draft_attn_backend
+            self.speculative_num_steps = width - 1
+            self.speculative_num_draft_tokens = width
+
+        before = time.perf_counter()
+        timestamp = time.time()
+        segment = getattr(self, "_native_segment_trace", None)
+        if segment is not None:
+            segment.begin(timestamp, size, width, self._native_draft_spill)
+        try:
+            result = self._forward_speculative_batch(batch)
+        finally:
+            self.speculative_num_steps = 7
+            self.speculative_num_draft_tokens = 8
+            self.draft_attn_backend = original_backend
+            self.draft_model_runner.draft_attn_backend = original_backend
+        elapsed_ms = (time.perf_counter() - before) * 1e3
+        if segment is not None:
+            segment.finish(elapsed_ms, result.num_accepted_tokens, self._native_draft_spill)
+        if self.tp_rank == 0:
+            policy.update(size, width, elapsed_ms, result.num_accepted_tokens)
+            trace_path = os.getenv("SPECSTREAM_NATIVE_DYNAMIC_TRACE")
+            if trace_path:
+                row = dict(
+                    timestamp=timestamp,
+                    batch_size=size,
+                    q=width,
+                    committed_draft=result.num_accepted_tokens,
+                    target_graph_replayed=bool(result.can_run_cuda_graph),
+                    proposal_graph_replayed=self._native_proposal_graph_replayed,
+                )
+                with open(trace_path, "a", encoding="utf8") as trace:
+                    trace.write(json.dumps(row, separators=(",", ":")) + "\n")
+        return result
+
+    def _forward_speculative_batch(self, batch: ScheduleBatch) -> GenerationBatchResult:
         """Run speculative decoding forward.
 
         NOTE: Many states of batch is modified as you go through. It is not guaranteed that
@@ -312,10 +452,29 @@ class EAGLEWorker(TpModelWorker):
                 can_run_cuda_graph=can_run_cuda_graph,
             )
         else:
+            draft_trace = None
+            if (
+                _NATIVE_DRAFT_TRACE_PATH
+                and self.speculative_algorithm.is_standalone()
+                and batch.forward_mode.is_decode()
+                and is_cuda()
+            ):
+                draft_trace = getattr(self, "_native_draft_trace", None)
+                if draft_trace is None:
+                    draft_trace = self._native_draft_trace = _NativeDraftTrace(
+                        _NATIVE_DRAFT_TRACE_PATH, self.tp_rank
+                    )
+                trace_timestamp = time.time()
+                trace_batch_size = batch.batch_size()
+                trace_extend = None
             with self.draft_tp_context(
                 self.draft_model_runner.tp_group
             ), speculative_moe_backend_context(), speculative_moe_a2a_backend_context():
+                if draft_trace is not None:
+                    draft_start = draft_trace.start()
                 spec_info = self.draft(batch)
+                if draft_trace is not None:
+                    trace_proposal = draft_trace.stop(draft_start)
             logits_output, verify_output, model_worker_batch, can_run_cuda_graph = (
                 self.verify(batch, spec_info)
             )
@@ -330,8 +489,17 @@ class EAGLEWorker(TpModelWorker):
                     or batch.spec_info.verified_id.shape[0] > 0
                 ):
                     # decode is not finished
+                    if draft_trace is not None:
+                        draft_start = draft_trace.start()
                     self.forward_draft_extend_after_decode(batch)
+                    if draft_trace is not None:
+                        trace_extend = draft_trace.stop(draft_start)
 
+            if draft_trace is not None:
+                draft_trace.enqueue(
+                    trace_timestamp, trace_batch_size, self.speculative_num_draft_tokens,
+                    trace_proposal, trace_extend,
+                )
             return GenerationBatchResult(
                 logits_output=logits_output,
                 next_token_ids=verify_output.verified_id,
@@ -557,9 +725,11 @@ class EAGLEWorker(TpModelWorker):
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.draft_model_runner
         )
-        can_cuda_graph = self.cuda_graph_runner and self.cuda_graph_runner.can_run(
-            forward_batch
+        can_cuda_graph = (
+            self.speculative_num_draft_tokens == self.server_args.speculative_num_draft_tokens
+            and self.cuda_graph_runner and self.cuda_graph_runner.can_run(forward_batch)
         )
+        self._native_proposal_graph_replayed = bool(can_cuda_graph)
         if can_cuda_graph:
             parent_list, top_scores_index, draft_tokens = self.cuda_graph_runner.replay(
                 forward_batch
@@ -613,7 +783,7 @@ class EAGLEWorker(TpModelWorker):
             retrive_cum_len=None,
             spec_steps=self.speculative_num_steps,
             topk=self.topk,
-            draft_token_num=self.server_args.speculative_num_draft_tokens,
+            draft_token_num=self.speculative_num_draft_tokens,
             capture_hidden_mode=CaptureHiddenMode.FULL,
             seq_lens_sum=forward_batch.seq_lens_sum,
             seq_lens_cpu=forward_batch.seq_lens_cpu,
@@ -727,10 +897,28 @@ class EAGLEWorker(TpModelWorker):
                 spec_info.retrive_next_token.shape
             ).cpu()
 
-        # Forward
-        batch_result = self.target_worker.forward_batch_generation(
-            model_worker_batch, is_verify=True
-        )
+        # For native lookahead, enqueue Target first. The Draft stream can
+        # then use the same ordered TP collectives while Target is executing.
+        parallel = getattr(self, "_native_round_parallel", None)
+        branch = parallel.prepare(batch, spec_info) if parallel is not None else None
+        if branch is not None:
+            branch.mark_target_start()
+        segment = getattr(self, "_native_segment_trace", None)
+        target_stage = nullcontext()
+        if segment is not None:
+            target_pool = self.target_worker.model_runner.token_to_kv_pool
+            target_stage = segment.target_stage(target_pool.native_target_spill)
+        try:
+            with target_stage:
+                batch_result = self.target_worker.forward_batch_generation(
+                    model_worker_batch, is_verify=True
+                )
+            if branch is not None:
+                branch.run()
+        except BaseException:
+            if branch is not None:
+                branch.abort()
+            raise
         logits_output, can_run_cuda_graph = (
             batch_result.logits_output,
             batch_result.can_run_cuda_graph,
@@ -766,6 +954,8 @@ class EAGLEWorker(TpModelWorker):
             self.page_size,
             vocab_mask,
         )
+        if branch is not None:
+            branch.reconcile(batch, res)
 
         # Post process based on verified outputs.
         # Pick indices that we care (accepted)
@@ -970,7 +1160,8 @@ class EAGLEWorker(TpModelWorker):
 
         # Run
         can_cuda_graph = (
-            self.cuda_graph_runner_for_draft_extend
+            self.speculative_num_draft_tokens == self.server_args.speculative_num_draft_tokens
+            and self.cuda_graph_runner_for_draft_extend
             and self.cuda_graph_runner_for_draft_extend.can_run(forward_batch)
         )
         if can_cuda_graph:

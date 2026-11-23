@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -72,6 +73,42 @@ _is_hip = is_hip()
 
 
 class ModelRunnerKVCacheMixin:
+    def _uses_cpu_draft_history(self):
+        return (os.environ.get("SPECSTREAM_DRAFT_CPU_ATTENTION") == "1"
+                and getattr(self.server_args, "spectre_role", None) == "draft")
+
+    def _native_target_pool_sizes(self: ModelRunner) -> Optional[Tuple[int, int]]:
+        physical = os.getenv("SPECSTREAM_NATIVE_TARGET_GPU_SLOTS")
+        logical = os.getenv("SPECSTREAM_NATIVE_LOGICAL_SLOTS")
+        if physical is None and logical is None:
+            return None
+        args = self.server_args
+        if self.is_draft_worker or physical is None or logical is None:
+            raise ValueError("Native Target overflow requires both physical and logical Target KV limits")
+        physical, logical = int(physical), int(logical)
+        draft = int(os.getenv("SPECSTREAM_NATIVE_DRAFT_GPU_SLOTS", "0"))
+        if not 0 < physical < logical or not 0 < draft < logical or args.max_total_tokens != physical:
+            raise ValueError("Set --max-total-tokens to the physical Target KV budget and supply both spill pools")
+        if (
+            args.speculative_algorithm != "STANDALONE"
+            or args.speculative_eagle_topk != 1 or args.page_size != 1
+            or args.tp_size != 2 or args.pp_size != 1 or args.attn_cp_size != 1
+            or args.enable_dp_attention or self.enable_hisparse
+            or args.disaggregation_mode != "null" or not args.disable_radix_cache
+            or not args.disable_overlap_schedule or args.enable_hierarchical_cache
+            or args.attention_backend != "fa3"
+            or args.prefill_attention_backend not in (None, "fa3")
+            or args.decode_attention_backend not in (None, "fa3")
+            or self.device != "cuda" or self.kv_cache_dtype != torch.bfloat16
+            or self.model_config.hf_config.model_type != "qwen3"
+            or self.use_mla_backend or self.is_hybrid_swa or self.mambaish_config is not None
+        ):
+            raise ValueError(
+                "Native Target overflow requires dense BF16 Qwen3 STANDALONE, FA3, "
+                "TP2, topk=1, page_size=1 and ordinary scheduling without shared cache"
+            )
+        return physical, logical
+
     def get_cell_size_per_token(self: ModelRunner, num_layers: int) -> int:
         kv_size = torch._utils._element_size(self.kv_cache_dtype)
         if self.use_mla_backend:
@@ -698,8 +735,15 @@ class ModelRunnerKVCacheMixin:
                         ),
                     )
                 else:
+                    physical_slots = getattr(self, "_native_target_gpu_slots", self.max_total_num_tokens)
+                    if self.is_draft_worker and os.getenv("SPECSTREAM_NATIVE_DRAFT_GPU_SLOTS"):
+                        from sglang.srt.speculative.native_draft_spill import native_draft_gpu_slots
+
+                        physical_slots = native_draft_gpu_slots(self)
                     self.token_to_kv_pool = MHATokenToKVPool(
-                        self.max_total_num_tokens,
+                        physical_slots,
+                        cpu_draft_history=self._uses_cpu_draft_history(),
+                        cpu_draft_tp_rank=self.tp_rank,
                         page_size=self.page_size,
                         dtype=self.kv_cache_dtype,
                         head_num=self.model_config.get_num_kv_heads(
@@ -867,13 +911,50 @@ class ModelRunnerKVCacheMixin:
             self.swa_max_total_num_tokens = config.swa_max_total_num_tokens
 
         self._init_pools()
+        if hasattr(self, "_native_target_gpu_slots"):
+            from sglang.srt.speculative.native_target_spill import NativeTargetSpill
+
+            pool, allocator = self.token_to_kv_pool, self.token_to_kv_pool_allocator
+            if (
+                type(pool) is not MHATokenToKVPool
+                or pool.size != self._native_target_gpu_slots
+                or type(allocator) is not TokenToKVPoolAllocator
+                or allocator.need_sort
+            ):
+                raise ValueError("Native Target overflow requires ordinary logical slot allocation with a split MHA pool")
+            spill = NativeTargetSpill(pool, allocator.size, self.tp_rank,
+                                      tp_threads=int(os.getenv("SPECSTREAM_CPU_ATTN_THREADS", "16")))
+            pool.native_target_spill = spill
+            allocator.native_target_spill = spill
 
     def _resolve_memory_pool_config(
         self: ModelRunner, pre_model_load_memory: int
     ) -> MemoryPoolConfig:
         """Profile GPU memory and resolve all pool parameters into a config."""
-        profiled_tokens = self.profile_max_num_token(pre_model_load_memory)
+        if self._uses_cpu_draft_history():
+            args = self.server_args
+            if (self.model_config.hf_config.model_type != "qwen3" or self.is_hybrid_swa
+                    or self.pp_size != 1 or not args.disable_cuda_graph
+                    or args.attention_backend != "fa3" or args.page_size != 1
+                    or args.prefill_attention_backend not in (None, "fa3")
+                    or args.decode_attention_backend not in (None, "fa3")):
+                raise ValueError("CPU Draft attention requires dense Qwen3, FA3, page_size=1, PP=1 and graphs disabled")
+            profiled_tokens = args.max_total_tokens
+            if profiled_tokens is None or profiled_tokens < 1:
+                raise ValueError("CPU Draft history requires an explicit --max-total-tokens host slot budget")
+        else:
+            profiled_tokens = self.profile_max_num_token(pre_model_load_memory)
         token_capacity = self._resolve_token_capacity(profiled_tokens)
+        native_sizes = self._native_target_pool_sizes()
+        if native_sizes is not None:
+            physical, logical = native_sizes
+            if token_capacity != physical:
+                raise ValueError(
+                    f"Native Target GPU pool needs {physical} physical slots, profiled capacity is {token_capacity}"
+                )
+            self._native_target_gpu_slots = physical
+            token_capacity = logical
+            logger.info("Native Target overflow uses %d physical GPU slots and %d logical slots", physical, logical)
 
         full_tokens = None
         swa_tokens = None

@@ -25,6 +25,7 @@ import socket
 import threading
 import time
 from collections import defaultdict
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple, Union
 
@@ -2675,29 +2676,30 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if not self.is_generation:
             kwargs["get_embedding"] = True
 
+        target_spill = getattr(self.token_to_kv_pool, "native_target_spill", None)
         can_run_graph = (
             self.piecewise_cuda_graph_runner is not None
+            and (target_spill is None or not target_spill.active)
             and self.piecewise_cuda_graph_runner.can_run(forward_batch)
         )
 
+        segment = getattr(self, "_native_segment_trace", None)
         if can_run_graph:
-            return (
-                self.piecewise_cuda_graph_runner.replay(forward_batch, **kwargs),
-                can_run_graph,
-            )
+            with segment.target_forward() if segment is not None else nullcontext():
+                logits = self.piecewise_cuda_graph_runner.replay(forward_batch, **kwargs)
+            return logits, can_run_graph
 
         if not skip_attn_backend_init:
             self.attn_backend.init_forward_metadata(forward_batch)
 
-        return (
-            self.model.forward(
+        with segment.target_forward() if segment is not None else nullcontext():
+            logits = self.model.forward(
                 forward_batch.input_ids,
                 forward_batch.positions,
                 forward_batch,
                 **kwargs,
-            ),
-            can_run_graph,
-        )
+            )
+        return logits, can_run_graph
 
     def forward_idle(
         self, forward_batch: ForwardBatch, pp_proxy_tensors=None
@@ -2811,18 +2813,22 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             if self.device == "cpu"
             else forward_batch.forward_mode.is_cuda_graph
         )
+        target_spill = getattr(self.token_to_kv_pool, "native_target_spill", None)
         can_run_graph = bool(
             mode_check()
             and self.graph_runner
+            and (target_spill is None or not target_spill.active)
             and self.graph_runner.can_run(forward_batch)
         )
 
         if can_run_graph:
-            ret = self.graph_runner.replay(
-                forward_batch,
-                skip_attn_backend_init=skip_attn_backend_init,
-                pp_proxy_tensors=pp_proxy_tensors,
-            )
+            segment = getattr(self, "_native_segment_trace", None)
+            with segment.target_forward() if segment is not None else nullcontext():
+                ret = self.graph_runner.replay(
+                    forward_batch,
+                    skip_attn_backend_init=skip_attn_backend_init,
+                    pp_proxy_tensors=pp_proxy_tensors,
+                )
             return ModelRunnerOutput(logits_output=ret, can_run_graph=can_run_graph)
 
         # For MLP sync

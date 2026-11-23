@@ -130,6 +130,8 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
 
     def clear(self):
         # The padded slot 0 is used for writing dummy outputs from padded tokens.
+        for pressure in self._native_pressures():
+            pressure.reset()
         self.free_pages = torch.arange(
             1, self.size + 1, dtype=torch.int64, device=self.device
         )
@@ -141,6 +143,16 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         # To avoid minor "len(free_pages) * 1" overhead
         return len(self.free_pages) + len(self.release_pages)
 
+    def _native_pressures(self):
+        return tuple(
+            pressure
+            for pressure in (
+                getattr(self, "native_draft_spill", None),
+                getattr(self, "native_target_spill", None),
+            )
+            if pressure is not None
+        )
+
     def alloc(self, need_size: int):
         if self.need_sort and need_size > len(self.free_pages):
             self.merge_and_sort_free()
@@ -148,6 +160,13 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         if need_size > len(self.free_pages):
             return None
 
+        for pressure in self._native_pressures():
+            if not pressure.active:
+                # Each physical pool keeps identity mapping until the
+                # unallocated high-id suffix reaches its own GPU boundary.
+                identity_slots_free = len(self.free_pages) - (self.size - pressure.gpu_slots)
+                if need_size > identity_slots_free:
+                    pressure.activate(self.free_pages)
         select_index = self.free_pages[:need_size]
         self.free_pages = self.free_pages[need_size:]
         return select_index
@@ -157,10 +176,19 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
             return
 
         if self.is_not_in_free_group:
-            if self.need_sort:
+            pressures = self._native_pressures()
+            if self.need_sort and not pressures:
                 self.release_pages = torch.cat((self.release_pages, free_index))
             else:
-                self.free_pages = torch.cat((self.free_pages, free_index))
+                for pressure in pressures:
+                    if pressure.active:
+                        pressure.free(free_index)
+                if any(not pressure.active for pressure in pressures):
+                    self.free_pages = torch.cat((free_index, self.free_pages))
+                else:
+                    self.free_pages = torch.cat((self.free_pages, free_index))
+                if self.available_size() == self.size and any(pressure.active for pressure in pressures):
+                    self.clear()
         else:
             self.free_group.append(free_index)
 

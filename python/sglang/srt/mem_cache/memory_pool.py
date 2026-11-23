@@ -758,6 +758,8 @@ class MHATokenToKVPool(KVCache):
         end_layer: Optional[int] = None,
         enable_alt_stream: bool = True,
         enable_kv_cache_copy: bool = False,
+        cpu_draft_history: bool = False,
+        cpu_draft_tp_rank: int = 0,
     ):
         super().__init__(
             size,
@@ -776,6 +778,23 @@ class MHATokenToKVPool(KVCache):
             if swa_v_head_dim is not None
             else v_head_dim if v_head_dim is not None else head_dim
         )
+
+        self.cpu_draft_history = None
+        if cpu_draft_history:
+            if (type(self) is not MHATokenToKVPool or dtype != torch.bfloat16
+                    or page_size != 1 or self.v_head_dim != self.head_dim):
+                raise ValueError("CPU Draft history requires ordinary BF16 MHA and page_size=1")
+            from sglang.srt.speculative.spectre.drafter.cpu_history_attention import CpuHistoryAttention
+
+            self.cpu_draft_history = CpuHistoryAttention(
+                layer_num, size + page_size, self.head_num, self.head_dim,
+                dtype=dtype, tp_rank=cpu_draft_tp_rank,
+            )
+            self._kv_copy_config = None
+            host_bytes = 2 * layer_num * (size + page_size) * self.head_num * self.head_dim * dtype.itemsize
+            logger.info("CPU Draft history: %d host KV slots, %d host bytes, 0 persistent GPU KV bytes",
+                        size, host_bytes)
+            return
 
         self._create_buffers()
 
@@ -892,6 +911,8 @@ class MHATokenToKVPool(KVCache):
         del self.v_buffer
 
     def get_kv_size_bytes(self):
+        if getattr(self, "cpu_draft_history", None) is not None:
+            return 0, 0  # This metric is device KV storage.
         assert hasattr(self, "k_buffer")
         assert hasattr(self, "v_buffer")
         k_size_bytes = 0
