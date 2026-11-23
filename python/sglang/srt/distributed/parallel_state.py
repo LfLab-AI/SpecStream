@@ -27,6 +27,7 @@ import gc
 import logging
 import os
 import pickle
+import threading
 import weakref
 from collections import namedtuple
 from contextlib import contextmanager, nullcontext
@@ -1431,6 +1432,7 @@ def init_model_parallel_group(
 _TP: Optional[GroupCoordinator] = None
 _ATTN_TP: Optional[GroupCoordinator] = None
 _ATTN_CP: Optional[GroupCoordinator] = None
+_LOOKAHEAD_TP = threading.local()
 
 # duplicate GroupCoordinator for prefill in PD-Multiplexing
 _PDMUX_PREFILL_TP_GROUP: Optional[GroupCoordinator] = None
@@ -1444,6 +1446,9 @@ def set_pdmux_status(enable_prefill_multiplexing: bool):
 
 
 def get_tp_group() -> GroupCoordinator:
+    lookahead_group = getattr(_LOOKAHEAD_TP, "group", None)
+    if lookahead_group is not None:
+        return lookahead_group
     if _ENABLE_PDMUX_P_TP:
         assert (
             _PDMUX_PREFILL_TP_GROUP is not None
@@ -1454,10 +1459,95 @@ def get_tp_group() -> GroupCoordinator:
 
 
 def get_attn_tp_group() -> GroupCoordinator:
+    lookahead_group = getattr(_LOOKAHEAD_TP, "group", None)
+    if lookahead_group is not None:
+        return lookahead_group
     assert (
         _ATTN_TP is not None
     ), "attention tensor model parallel group is not initialized"
     return _ATTN_TP
+
+
+class _LookaheadTPGroup(GroupCoordinator):
+    """Isolate Draft collectives from Target's CUDA communicator.
+
+    Two GPU communicators still require the same cross-communicator launch
+    order on every rank. The two host threads cannot guarantee that order.
+    Draft's small activation reductions and logits gathers therefore use
+    a separate Gloo group. Transfers follow the caller's CUDA stream.
+    """
+
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        host = input_.to("cpu").contiguous()
+        # FP32 accumulation preserves the sum of two BF16/FP16 activations
+        # before the destination rounds to its original dtype.
+        if host.dtype in (torch.bfloat16, torch.float16):
+            host = host.float()
+        torch.distributed.all_reduce(host, group=self.cpu_group)
+        if host is not input_:
+            input_.copy_(host.to(input_.dtype))
+        return input_
+
+    def _gather_host(self, input_: torch.Tensor) -> torch.Tensor:
+        host = input_.to("cpu").contiguous().reshape(-1).view(torch.uint8)
+        gathered = torch.empty((self.world_size, host.numel()), dtype=torch.uint8)
+        # Gather bytes to preserve BF16 values exactly and avoid relying on
+        # Gloo's all_gather_into_tensor or BF16 type support.
+        torch.distributed.all_gather(list(gathered.unbind()), host, group=self.cpu_group)
+        return gathered.view(input_.dtype)
+
+    def all_gather_into_tensor(self, output: torch.Tensor, input_: torch.Tensor):
+        output.copy_(self._gather_host(input_).reshape(output.shape))
+
+    def all_gather(
+        self,
+        input_: torch.Tensor,
+        dim: int = -1,
+        output_tensor_list: Optional[List[torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        if output_tensor_list is None:
+            return super().all_gather(input_, dim)
+        gathered = self._gather_host(input_)
+        for output, row in zip(output_tensor_list, gathered.unbind()):
+            output.copy_(row.reshape(input_.shape))
+
+
+def make_lookahead_tp_group(base_group: GroupCoordinator) -> GroupCoordinator:
+    """Create and initialize the isolated Draft TP2 group on both ranks."""
+    if (
+        base_group.device.type != "cuda"
+        or base_group.world_size != 2
+        or get_world_group().ranks != base_group.ranks
+        or get_attn_tp_group().ranks != base_group.ranks
+        or base_group.is_symmetric_memory_enabled()
+    ):
+        raise ValueError("Concurrent Draft requires local TP2 with symmetric memory disabled")
+    return _LookaheadTPGroup(
+        group_ranks=[base_group.ranks],
+        local_rank=base_group.local_rank,
+        torch_distributed_backend="gloo",
+        use_pynccl=False,
+        use_pymscclpp=False,
+        use_custom_allreduce=False,
+        use_torch_symm_mem_all_reduce=False,
+        use_hpu_communicator=False,
+        use_xpu_communicator=False,
+        use_npu_communicator=False,
+        group_name="specstream_lookahead",
+        gloo_timeout=timedelta(seconds=45),
+    )
+
+
+@contextmanager
+def use_lookahead_tp_group(group: GroupCoordinator):
+    """Route TP operations to the isolated group only in this thread."""
+    if getattr(_LOOKAHEAD_TP, "group", None) is not None:
+        raise RuntimeError("A Draft TP override is already active in this thread")
+    _LOOKAHEAD_TP.group = group
+    try:
+        yield
+    finally:
+        del _LOOKAHEAD_TP.group
 
 
 def get_attn_cp_group() -> GroupCoordinator:

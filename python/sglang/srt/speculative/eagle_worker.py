@@ -453,6 +453,7 @@ class EAGLEWorker(TpModelWorker):
             )
         else:
             draft_trace = None
+            segment = getattr(self, "_native_segment_trace", None)
             if (
                 _NATIVE_DRAFT_TRACE_PATH
                 and self.speculative_algorithm.is_standalone()
@@ -491,7 +492,8 @@ class EAGLEWorker(TpModelWorker):
                     # decode is not finished
                     if draft_trace is not None:
                         draft_start = draft_trace.start()
-                    self.forward_draft_extend_after_decode(batch)
+                    with segment.post_verify_draft() if segment is not None else nullcontext():
+                        self.forward_draft_extend_after_decode(batch)
                     if draft_trace is not None:
                         trace_extend = draft_trace.stop(draft_start)
 
@@ -897,24 +899,26 @@ class EAGLEWorker(TpModelWorker):
                 spec_info.retrive_next_token.shape
             ).cpu()
 
-        # For native lookahead, enqueue Target first. The Draft stream can
-        # then use the same ordered TP collectives while Target is executing.
+        # Prepare Draft slots before launching either model. Draft runs on its
+        # own stream and collective group while Target submits its forward.
         parallel = getattr(self, "_native_round_parallel", None)
         branch = parallel.prepare(batch, spec_info) if parallel is not None else None
-        if branch is not None:
-            branch.mark_target_start()
         segment = getattr(self, "_native_segment_trace", None)
         target_stage = nullcontext()
         if segment is not None:
+            if segment.active is not None:
+                segment.active.lookahead_admitted = branch is not None and branch.skip is None
             target_pool = self.target_worker.model_runner.token_to_kv_pool
             target_stage = segment.target_stage(target_pool.native_target_spill)
         try:
             with target_stage:
+                if branch is not None:
+                    branch.start()
                 batch_result = self.target_worker.forward_batch_generation(
                     model_worker_batch, is_verify=True
                 )
             if branch is not None:
-                branch.run()
+                branch.finish_target()
         except BaseException:
             if branch is not None:
                 branch.abort()
@@ -955,7 +959,8 @@ class EAGLEWorker(TpModelWorker):
             vocab_mask,
         )
         if branch is not None:
-            branch.reconcile(batch, res)
+            with segment.post_verify_draft() if segment is not None else nullcontext():
+                branch.reconcile(batch, res)
 
         # Post process based on verified outputs.
         # Pick indices that we care (accepted)

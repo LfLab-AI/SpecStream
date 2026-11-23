@@ -153,11 +153,11 @@ class StandaloneWorker(EAGLEWorker):
             from sglang.srt.speculative.native_segment_timing import NativeSegmentTiming
 
             target_runner = self.target_worker.model_runner
-            if (parallel_setting != "0" or self._native_draft_spill is None
+            if (self._native_draft_spill is None
                     or not getattr(target_runner.token_to_kv_pool, "native_target_spill", None)
                     or os.getenv("SPECSTREAM_CPU_ATTN_TIMING") != "1"
                     or os.getenv("SPECSTREAM_NATIVE_DYNAMIC_Q") != "1"):
-                raise ValueError("Segment timing requires serial dynamic-q Target/Draft spill with CPU timing")
+                raise ValueError("Segment timing requires dynamic-q Target/Draft spill with CPU timing")
             self._native_segment_trace = NativeSegmentTiming(
                 segment_path, tp_rank, int(os.getenv("SPECSTREAM_NATIVE_SEGMENT_STRIDE", "3")),
             )
@@ -218,6 +218,8 @@ class StandaloneWorker(EAGLEWorker):
                 self._native_draft_spill.end_tentative()
 
     def forward_draft_extend(self, *args, **kwargs):
+        if self._native_round_parallel is not None:
+            self._native_round_parallel.clear_partial()
         self._update_native_draft_graphs()
         return super().forward_draft_extend(*args, **kwargs)
 

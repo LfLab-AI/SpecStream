@@ -1,8 +1,8 @@
-"""Per-rank timing for sampled serial Draft/Target decoding rounds."""
+"""Per-rank timing for sampled Draft/Target decoding rounds."""
 
 from collections import deque
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import time
@@ -21,6 +21,9 @@ class _Round:
     target_start: torch.cuda.Event | None = None
     target_end: torch.cuda.Event | None = None
     target_stage_wall_ms: float = 0.0
+    post_verify_events: list = field(default_factory=list)
+    post_verify_host_ms: float = 0.0
+    lookahead_admitted: bool = False
 
 
 class NativeSegmentTiming:
@@ -34,6 +37,7 @@ class NativeSegmentTiming:
         self.round_id = 0
         self.active = None
         self.pending = deque()
+        self.lookahead_admission = None
 
     def begin(self, timestamp, batch_size, q, draft_spill):
         self.round_id += 1
@@ -71,6 +75,23 @@ class NativeSegmentTiming:
         finally:
             sample.target_end.record()
 
+    @contextmanager
+    def post_verify_draft(self):
+        sample = self.active
+        if sample is None:
+            yield
+            return
+        begin = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        begin.record()
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            end.record()
+            sample.post_verify_host_ms += (time.perf_counter() - start) * 1e3
+            sample.post_verify_events.append((begin, end))
+
     def finish(self, wall_ms, committed_draft, draft_spill):
         if self.active is not None:
             sample = self.active
@@ -87,6 +108,8 @@ class NativeSegmentTiming:
                 "round_wall_ms": wall_ms,
                 "draft_cpu_attention_ms": (draft_spill.cpu_attention_ns - sample.draft_cpu_start_ns) / 1e6,
                 "target_stage_wall_ms": sample.target_stage_wall_ms,
+                "post_verify_draft_host_ms": sample.post_verify_host_ms,
+                "lookahead_admitted": sample.lookahead_admitted,
             }
             self.pending.append((sample, row))
         self.flush()
@@ -95,13 +118,18 @@ class NativeSegmentTiming:
         rows = []
         while self.pending:
             sample, row = self.pending[0]
-            if not sample.target_end.query():
+            if not sample.target_end.query() or any(not end.query() for _, end in sample.post_verify_events):
                 break
             timings = sample.target_spill.take_verify_timing(sample.round_id)
             if timings is None:
                 break
-            row.update(timings, target_forward_cuda_ms=sample.target_start.elapsed_time(sample.target_end))
+            row.update(
+                timings, target_forward_cuda_ms=sample.target_start.elapsed_time(sample.target_end),
+                post_verify_draft_ms=sum(begin.elapsed_time(end) for begin, end in sample.post_verify_events),
+            )
             self.pending.popleft()
+            if self.lookahead_admission is not None:
+                self.lookahead_admission.observe_transfer(row)
             rows.append(row)
         if rows:
             with self.path.open("a", encoding="utf-8") as output:

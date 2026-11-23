@@ -1,0 +1,130 @@
+{
+  "buckets": {
+    "16:2": {
+      "initial_ms": 163.2793595,
+      "candidate_ms": 165.121032,
+      "window_ms": 383.367172,
+      "h2d_ms_per_gib": null,
+      "observed_rounds": 39
+    },
+    "16:4": {
+      "initial_ms": 484.25829749999997,
+      "candidate_ms": 165.121032,
+      "window_ms": 416.69836399999997,
+      "h2d_ms_per_gib": null,
+      "observed_rounds": 3
+    },
+    "16:6": {
+      "initial_ms": 432.89421225,
+      "candidate_ms": 165.121032,
+      "window_ms": 471.54380025,
+      "h2d_ms_per_gib": null,
+      "observed_rounds": 4
+    },
+    "16:8": {
+      "initial_ms": 775.44704475,
+      "candidate_ms": 165.121032,
+      "window_ms": 598.37364175,
+      "h2d_ms_per_gib": 47.636605177593154,
+      "observed_rounds": 2
+    },
+    "24:2": {
+      "initial_ms": 281.629696,
+      "candidate_ms": 279.359527,
+      "window_ms": 805.427185,
+      "h2d_ms_per_gib": 46.72917562136032,
+      "observed_rounds": 105
+    },
+    "24:4": {
+      "initial_ms": 864.5550135,
+      "candidate_ms": 279.359527,
+      "window_ms": 761.2190855,
+      "h2d_ms_per_gib": null,
+      "observed_rounds": 3
+    },
+    "24:6": {
+      "initial_ms": 1159.9682305,
+      "candidate_ms": 279.359527,
+      "window_ms": 816.615936,
+      "h2d_ms_per_gib": null,
+      "observed_rounds": 7
+    },
+    "24:8": {
+      "initial_ms": 1106.925841,
+      "candidate_ms": 279.359527,
+      "window_ms": 820.2636714999999,
+      "h2d_ms_per_gib": null,
+      "observed_rounds": 2
+    },
+    "31:2": {
+      "initial_ms": 459.50797824999995,
+      "candidate_ms": 357.70882424999996,
+      "window_ms": 1266.34722925,
+      "h2d_ms_per_gib": 46.107287854750865,
+      "observed_rounds": 12
+    },
+    "31:6": {
+      "initial_ms": 1455.6462185,
+      "candidate_ms": 357.70882424999996,
+      "window_ms": 1363.812378,
+      "h2d_ms_per_gib": null,
+      "observed_rounds": 3
+    },
+    "32:2": {
+      "initial_ms": 457.95993350000003,
+      "candidate_ms": 445.720566,
+      "window_ms": 1535.2647705,
+      "h2d_ms_per_gib": 46.192239770488435,
+      "observed_rounds": 47
+    },
+    "32:4": {
+      "initial_ms": 1623.5814452500001,
+      "candidate_ms": 445.720566,
+      "window_ms": 1490.8602905000002,
+      "h2d_ms_per_gib": 46.100073839197606,
+      "observed_rounds": 2
+    },
+    "32:6": {
+      "initial_ms": 1898.656226,
+      "candidate_ms": 445.720566,
+      "window_ms": 1576.7862245,
+      "h2d_ms_per_gib": 45.43540491240865,
+      "observed_rounds": 16
+    },
+    "32:8": {
+      "initial_ms": 2049.5556885,
+      "candidate_ms": 445.720566,
+      "window_ms": 1610.14453125,
+      "h2d_ms_per_gib": null,
+      "observed_rounds": 2
+    },
+    "4:4": {
+      "initial_ms": 132.8435195,
+      "candidate_ms": 81.77153,
+      "window_ms": 169.56518549999998,
+      "h2d_ms_per_gib": null,
+      "observed_rounds": 3
+    },
+    "4:6": {
+      "initial_ms": 110.52979225,
+      "candidate_ms": 81.77153,
+      "window_ms": 163.77983875,
+      "h2d_ms_per_gib": null,
+      "observed_rounds": 8
+    },
+    "4:8": {
+      "initial_ms": 202.74176425000002,
+      "candidate_ms": 81.77153,
+      "window_ms": 170.75532125,
+      "h2d_ms_per_gib": null,
+      "observed_rounds": 4
+    },
+    "8:8": {
+      "initial_ms": 448.17279625,
+      "candidate_ms": 85.29766825,
+      "window_ms": 328.070923,
+      "h2d_ms_per_gib": null,
+      "observed_rounds": 2
+    }
+  }
+}

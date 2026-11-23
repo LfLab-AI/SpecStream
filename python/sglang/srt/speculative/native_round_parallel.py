@@ -1,16 +1,19 @@
-"""Native lookahead experiment which prioritizes up to four GPU-resident rows."""
+"""Native speculative lookahead with the same split Draft attention as decoding."""
 
 from __future__ import annotations
 
 import json
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from copy import copy
 from dataclasses import dataclass
 
 import numpy as np
 import torch
 
+from sglang.srt.distributed.parallel_state import make_lookahead_tp_group, use_lookahead_tp_group
 from sglang.srt.layers.attention.flashattention_backend import FlashAttentionMetadata
 from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,
@@ -20,6 +23,7 @@ from sglang.srt.model_executor.forward_batch_info import (
 from sglang.srt.speculative.eagle_info import EagleVerifyInput
 from sglang.srt.speculative.eagle_utils import build_tree_kernel_efficient
 from sglang.srt.speculative.native_draft_spill import DraftAttentionPlan
+from sglang.srt.speculative.native_lookahead_admission import LookaheadAdmission
 from sglang.srt.speculative.spec_utils import fast_topk
 
 
@@ -27,6 +31,12 @@ from sglang.srt.speculative.spec_utils import fast_topk
 class _ReadyCandidates:
     request_state: tuple
     tokens: torch.Tensor
+
+
+@dataclass
+class _PartialCandidates:
+    tokens: torch.Tensor
+    physical: np.ndarray
 
 
 @dataclass
@@ -66,13 +76,37 @@ class NativeRoundParallel:
         self.enabled = enabled
         self.device = worker.draft_model_runner.device
         self.stream = torch.cuda.Stream(device=self.device) if enabled else None
+        sm_limit = int(os.getenv("SPECSTREAM_NATIVE_LOOKAHEAD_SM_LIMIT", "0"))
+        if enabled and sm_limit:
+            from sgl_kernel import spatial
+
+            device_id = torch.cuda.current_device()
+            available = spatial.get_sm_available(device_id)
+            if sm_limit < 4 or sm_limit % 2 or available - sm_limit < 4:
+                raise ValueError("Expected a valid Ampere Draft SM limit")
+            self._spatial_streams = spatial.create_greenctx_stream_by_value(
+                available - sm_limit, sm_limit, device_id,
+            )
+            self.stream = self._spatial_streams[1]
+        self.tp_group = make_lookahead_tp_group(worker.target_worker.model_runner.tp_group) if enabled else None
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="draft-lookahead") if enabled else None
         self.trace = trace
         self.round_id = 0
         self.ready = None
         self.trim = None
         self.cached_candidates_consumed = 0
         self.seed_candidates_consumed = 0
+        self.partial_candidates_consumed = 0
         self.seeded_requests = set()
+        profile_path = os.getenv("SPECSTREAM_NATIVE_LOOKAHEAD_ADMISSION")
+        self.partial_enabled = enabled and bool(profile_path)
+        if self.partial_enabled and worker.hot_token_id is not None:
+            raise ValueError("Partial native lookahead requires the full Draft vocabulary")
+        self.admission = LookaheadAdmission(profile_path) if self.partial_enabled and self.tp_group.rank_in_group == 0 else None
+        if self.admission is not None and worker._native_segment_trace is not None:
+            worker._native_segment_trace.lookahead_admission = self.admission
+        self.partial = {}
+        self.partial_spill_map = None
         diagnostic = os.getenv("SPECSTREAM_NATIVE_ROUND_DIAGNOSTIC_MAX_STAGES")
         self.diagnostic_max_stages = None
         if diagnostic is not None:
@@ -82,36 +116,42 @@ class NativeRoundParallel:
 
     def use_ready(self, batch):
         self.cached_candidates_consumed = 0
-        active = set(_request_state(batch.reqs))
+        self.partial_candidates_consumed = 0
+        request_state = _request_state(batch.reqs)
+        active = set(request_state)
         self.seed_candidates_consumed = len(active & self.seeded_requests)
         self.seeded_requests.difference_update(active)
         ready, self.ready = self.ready, None
-        if ready is None or _request_state(batch.reqs) != ready.request_state:
-            return None
         worker = self.worker
         steps = worker.speculative_num_steps
-        if ready.tokens.shape[1] < steps:
-            return None
-        for req in batch.reqs:
-            req.decode_batch_idx += 1
-        spec = batch.spec_info
-        if batch.sampling_info.penalizer_orchestrator.is_required:
-            batch.sampling_info.penalizer_orchestrator.cumulate_output_tokens(
-                spec.verified_id.to(torch.int64)
-            )
-        seq_lens_sum = int(batch.seq_lens_cpu.sum().item())
-        batch.seq_lens_sum = seq_lens_sum
+        if ready is not None and request_state == ready.request_state and ready.tokens.shape[1] >= steps:
+            self.clear_partial()
+            for req in batch.reqs:
+                req.decode_batch_idx += 1
+            spec = batch.spec_info
+            if batch.sampling_info.penalizer_orchestrator.is_required:
+                batch.sampling_info.penalizer_orchestrator.cumulate_output_tokens(
+                    spec.verified_id.to(torch.int64)
+                )
+            batch.seq_lens_sum = int(batch.seq_lens_cpu.sum().item())
+            self.cached_candidates_consumed = batch.batch_size() * steps
+            return self.build_verify_input(batch, ready.tokens[:, :steps])
+        return self.continue_partial(batch, request_state)
+
+    def build_verify_input(self, batch, candidate_tokens):
+        worker = self.worker
+        steps = worker.speculative_num_steps
+        seq_lens_sum = batch.seq_lens_sum
         indices = torch.arange(steps, device=self.device, dtype=torch.int64)
         parents = indices.sub(1).expand(batch.batch_size(), -1).contiguous()
         if steps == 1:
             parents = parents[:, :0].contiguous()
         tree, positions, retrieve, child, sibling, tokens = build_tree_kernel_efficient(
-            spec.verified_id, parents, indices.expand(batch.batch_size(), -1).contiguous(),
-            ready.tokens[:, :steps].contiguous(), batch.seq_lens, seq_lens_sum, 1,
+            batch.spec_info.verified_id, parents, indices.expand(batch.batch_size(), -1).contiguous(),
+            candidate_tokens.contiguous(), batch.seq_lens, seq_lens_sum, 1,
             steps, steps + 1,
         )
         worker._native_proposal_graph_replayed = False
-        self.cached_candidates_consumed = batch.batch_size() * steps
         return EagleVerifyInput(
             draft_token=tokens, custom_mask=tree, positions=positions,
             retrive_index=retrieve, retrive_next_token=child, retrive_next_sibling=sibling,
@@ -120,7 +160,127 @@ class NativeRoundParallel:
             seq_lens_cpu=batch.seq_lens_cpu,
         )
 
+    def clear_partial(self):
+        if self.partial_spill_map is not None and self.partial_spill_map is self.spill.gpu_map:
+            for proposal in self.partial.values():
+                self.spill.gpu_free.extend(proposal.physical.tolist())
+        self.partial.clear()
+        self.partial_spill_map = None
+
+    def continue_partial(self, batch, request_state):
+        if not self.partial:
+            return None
+        spill = self.spill
+        worker = self.worker
+        steps = worker.speculative_num_steps
+        if steps < 2 or not spill.active or self.partial_spill_map is not spill.gpu_map:
+            self.clear_partial()
+            return None
+        retained = {i: self.partial[key] for i, key in enumerate(request_state) if key in self.partial}
+        if not retained:
+            self.clear_partial()
+            return None
+        # Allocate the normal tentative logical suffix. A detached GPU page
+        # has no logical ID until adopted into these slots, so it cannot be
+        # read by Target or evicted to Draft's committed CPU history.
+        try:
+            worker._draft_preprocess_decode(batch)
+            logical = batch.out_cache_loc.cpu().numpy().reshape(batch.batch_size(), steps)
+            if np.any(spill.gpu_map[logical]) or np.any(spill.cpu_map[logical]):
+                raise RuntimeError("Partial Draft proposal has an occupied destination")
+            spill.tentative = logical.reshape(-1)
+            tokens = batch.spec_info.topk_index.reshape(-1, 1).expand(-1, steps).clone()
+            ready_lengths = np.ones(batch.batch_size(), dtype=np.int64)
+            for row, proposal in retained.items():
+                count = min(steps, proposal.tokens.numel())
+                tokens[row, :count] = proposal.tokens[:count]
+                ready_lengths[row] = count
+                # The last emitted candidate doesn't need its KV materialized
+                # until we run it to obtain its successor.
+                spill.gpu_map[logical[row, :count - 1]] = proposal.physical[:count - 1]
+                proposal.physical = proposal.physical[count - 1:]
+                self.partial_candidates_consumed += count - 1
+            self.clear_partial()
+            return self.finish_partial(batch, logical, tokens, ready_lengths)
+        finally:
+            self.clear_partial()
+            spill.end_tentative()
+
+    def finish_partial(self, batch, logical, tokens, ready_lengths):
+        spill = self.spill
+        device = self.device
+        runner = self.worker.draft_model_runner
+        backend = runner.attn_backend
+        lengths = batch.seq_lens_cpu.numpy()
+        table = batch.req_to_token_pool.req_to_token[
+            batch.req_pool_indices, :int(lengths.max())
+        ].cpu().numpy()
+        history = [row[:n] for row, n in zip(table, lengths)]
+        protected = np.concatenate([row[-128:] for row in history])
+        spill._allocate_writes(logical.reshape(-1), protected)
+        gpu_prefix, cpu_prefix = [], []
+        for row in history:
+            gpu, cpu = spill.gpu_map[row], spill.cpu_map[row]
+            if np.any(row <= 0) or np.any((gpu > 0) == (cpu > 0)):
+                raise RuntimeError("Partial Draft proposal found invalid committed history")
+            gpu_prefix.append(gpu[gpu > 0])
+            cpu_prefix.append(cpu[cpu > 0])
+        physical = spill.gpu_map[logical]
+        prefix_gpu_sizes = np.array([len(row) for row in gpu_prefix], dtype=np.int32)
+        page_table = np.zeros((len(history), int(prefix_gpu_sizes.max()) + logical.shape[1]), dtype=np.int32)
+        for row, pages, sizes, suffix in zip(page_table, gpu_prefix, prefix_gpu_sizes, physical):
+            row[:sizes] = pages
+            row[sizes:sizes + len(suffix)] = suffix
+        table = torch.as_tensor(page_table, device=device)
+        destinations = torch.as_tensor(physical, device=device)
+        state = backend.forward_metadata
+        try:
+            for step in range(tokens.shape[1] - 1):
+                rows = np.flatnonzero(ready_lengths <= step + 1)
+                if not len(rows):
+                    continue
+                picks = torch.as_tensor(rows, device=device)
+                seq_lens_cpu = torch.as_tensor(lengths[rows] + step + 1, dtype=torch.int32)
+                seq_lens = seq_lens_cpu.to(device)
+                writes = destinations[picks, step]
+                cpu_indices = [i for i, r in enumerate(rows) if len(cpu_prefix[r])]
+                plan = DraftAttentionPlan(
+                    write_slots=writes, page_table=table.index_select(0, picks),
+                    lengths=torch.as_tensor(prefix_gpu_sizes[rows] + step + 1, device=device),
+                    cpu_rows=[cpu_prefix[rows[i]] for i in cpu_indices],
+                    cpu_queries=[np.array([i], dtype=np.int64) for i in cpu_indices],
+                )
+                if cpu_indices:
+                    plan.cpu_groups = list(spill._cpu_groups(plan, device))
+                offsets = torch.arange(len(rows) + 1, dtype=torch.int32, device=device)
+                metadata = FlashAttentionMetadata(
+                    max_seq_len_q=1, max_seq_len_k=int(seq_lens_cpu.max()), cu_seqlens_q=offsets,
+                )
+                metadata.native_draft_spill_plan = plan
+                backend.forward_metadata = metadata
+                frame = ForwardBatch(
+                    forward_mode=ForwardMode.DRAFT_EXTEND, batch_size=len(rows),
+                    input_ids=tokens[picks, step], positions=seq_lens.to(torch.int64),
+                    req_pool_indices=None, seq_lens=seq_lens, out_cache_loc=writes,
+                    seq_lens_sum=int(seq_lens_cpu.sum()), seq_lens_cpu=seq_lens_cpu,
+                    extend_num_tokens=len(rows), extend_seq_lens=torch.ones_like(seq_lens),
+                    extend_start_loc=offsets[:-1], extend_prefix_lens=seq_lens - 1,
+                    extend_prefix_lens_cpu=(lengths[rows] + step).tolist(),
+                    extend_seq_lens_cpu=[1] * len(rows), extend_logprob_start_lens_cpu=[0] * len(rows),
+                    token_to_kv_pool=spill.pool, attn_backend=backend,
+                    capture_hidden_mode=CaptureHiddenMode.LAST,
+                    spec_algorithm=self.worker.speculative_algorithm,
+                )
+                logits = runner.forward(frame, skip_attn_backend_init=True).logits_output
+                tokens[picks, step + 1] = fast_topk(
+                    torch.softmax(logits.next_token_logits, dim=-1), 1, dim=-1,
+                )[1].reshape(-1)
+        finally:
+            backend.forward_metadata = state
+        return self.build_verify_input(batch, tokens)
+
     def prepare(self, batch, verify_info):
+        self.clear_partial()
         self.round_id += 1
         self.trim = None
         self.ready = None
@@ -222,6 +382,13 @@ class _Round:
         self.cohort_size = 0
         self.output_starts = [len(req.output_ids) for req in batch.reqs]
         self.event_start = self.event_end = None
+        self.target_forward_submitted = threading.Event()
+        self.cancelled = threading.Event()
+        self.future = None
+        self.target_host_start_ns = self.target_host_submitted_ns = None
+        self.draft_host_start_ns = self.draft_host_end_ns = None
+        self.admission_decision = None
+        self.stop_reason = None
         self.timestamp = time.time()
         self.extra = None
         self.verify_slots = None
@@ -241,6 +408,16 @@ class _Round:
         if batch.forward_mode.is_idle() or batch.has_grammar or not batch.reqs:
             self.skip = "unsupported_batch"
             return
+        if self.owner.partial_enabled:
+            decision = None
+            if self.owner.admission is not None:
+                pool = self.worker.target_worker.model_runner.token_to_kv_pool
+                target_host = pool.native_target_spill.cpu_resident_tokens
+                decision = self.owner.admission.decide(self.batch_size, self.width, target_host)
+            self.admission_decision = self.owner.tp_group.broadcast_object(decision, src=0)
+            self.skip = self.admission_decision["skip"]
+            if self.skip is not None:
+                return
         device = self.owner.device
         lengths = batch.seq_lens_cpu.tolist()
         context_limit = self.worker.draft_model_runner.model_config.context_len
@@ -253,20 +430,15 @@ class _Round:
         history = [row[:n] for row, n in zip(table, lengths)]
         if any(np.any(row <= 0) for row in history):
             raise RuntimeError("Round lookahead has an incomplete committed Draft prefix")
-        # Preserve exact attention. A row with resident CPU KV is never
-        # approximated, and planned writes must not evict selected history.
         self.rows = [
-            i for i, (n, row) in enumerate(zip(lengths, history))
-            if n + 2 * self.width - 2 < context_limit and np.all(spill.gpu_map[row] > 0)
-            and not np.any(spill.cpu_map[row])
-        ][:4]
+            i for i, n in enumerate(lengths)
+            if n + 2 * self.width - 2 < context_limit
+        ]
         self.cohort_size = len(self.rows)
         if not self.rows:
-            self.skip = "no_gpu_resident_rows"
+            self.skip = "context_limit"
             return
-        protected = np.concatenate([
-            row if i in self.rows else row[-128:] for i, row in enumerate(history)
-        ])
+        protected = np.concatenate([row[-128:] for row in history])
         unprotected_gpu = max(0, spill.gpu_slots - len(spill.gpu_free) - int(
             np.count_nonzero(spill.gpu_map[protected])
         ))
@@ -302,11 +474,15 @@ class _Round:
         spill = self.owner.spill
         runner = self.worker.draft_model_runner
         gpu_prefix = []
+        cpu_prefix = []
         for row in history:
             gpu, cpu = spill.gpu_map[row], spill.cpu_map[row]
-            if np.any(gpu <= 0) or np.any(cpu):
-                raise RuntimeError("Prepared GPU cohort lost residency")
-            gpu_prefix.append(gpu)
+            if np.any((gpu > 0) == (cpu > 0)):
+                raise RuntimeError("Draft history must have exactly one KV owner per token")
+            gpu_prefix.append(gpu[gpu > 0])
+            cpu_prefix.append(cpu[cpu > 0])
+        cpu_rows = [row for row in cpu_prefix if len(row)]
+        cpu_indices = [i for i, row in enumerate(cpu_prefix) if len(row)]
         destinations = spill.gpu_map[targets]
         prefix_gpu_sizes = np.array([len(x) for x in gpu_prefix], dtype=np.int32)
         table = np.zeros((self.cohort_size, int(prefix_gpu_sizes.max()) + targets.shape[1]), dtype=np.int32)
@@ -321,6 +497,10 @@ class _Round:
         stages.extend((i, i + 1) for i in range(self.width, targets.shape[1]))
         for left, right in stages:
             queries = right - left
+            cpu_queries = [
+                np.arange(i * queries, (i + 1) * queries, dtype=np.int64)
+                for i in cpu_indices
+            ]
             lengths_cpu = torch.tensor([n + right for n in lengths], dtype=torch.int32)
             sequence_lengths = starts.to(torch.int32) + right
             # The current candidate prefix and bonus use canonical extend
@@ -349,8 +529,10 @@ class _Round:
             plan = DraftAttentionPlan(
                 write_slots=writes, page_table=page_table,
                 lengths=torch.as_tensor(prefix_gpu_sizes + right, device=device),
-                cpu_rows=[], cpu_queries=[],
+                cpu_rows=cpu_rows, cpu_queries=cpu_queries,
             )
+            if cpu_queries and len(cpu_queries) * queries <= 128:
+                plan.cpu_groups = list(spill._cpu_groups(plan, page_table.device))
             metadata = FlashAttentionMetadata(
                 max_seq_len_q=queries, max_seq_len_k=int(lengths_cpu.max().item()),
                 cu_seqlens_q=torch.arange(0, (self.cohort_size + 1) * queries, queries,
@@ -359,103 +541,166 @@ class _Round:
             metadata.native_draft_spill_plan = plan
             self.work.append((frame, metadata))
 
-    def mark_target_start(self):
+    def start(self):
         if self.skip is None:
             self.event_start = torch.cuda.Event(enable_timing=True)
             self.event_end = torch.cuda.Event(enable_timing=True)
             self.event_start.record()
+            self.target_host_start_ns = time.monotonic_ns()
+            self.future = self.owner.executor.submit(self.run)
 
-    def run(self):
-        if self.skip is not None:
+    def finish_target(self):
+        if self.future is None:
             return
         self.event_end.record()
+        self.target_host_submitted_ns = time.monotonic_ns()
+        self.target_forward_submitted.set()
+        self.join()
+
+    def join(self):
+        if self.future is None:
+            return
+        future, self.future = self.future, None
+        try:
+            future.result()
+        finally:
+            # Only the scheduler thread changes logical-to-physical slot ownership.
+            if not self.owner.partial_enabled:
+                self.release_future()
+
+    def run(self):
+        self.draft_host_start_ns = time.monotonic_ns()
         stream = self.owner.stream
-        stream.wait_event(self.event_start)
         runner = self.worker.draft_model_runner
         backend = runner.attn_backend
         state = backend.forward_metadata
-        group = self.worker.target_worker.model_runner.tp_group
-        complete = False
+        group = self.owner.tp_group
         try:
-            with torch.cuda.stream(stream):
+            with (
+                # Split attention keeps mutable pinned buffers across rounds
+                # and also uses them from the scheduler's no-grad context.
+                torch.no_grad(),
+                torch.cuda.device(stream.device),
+                torch.cuda.stream(stream),
+                use_lookahead_tp_group(group),
+            ):
+                stream.wait_event(self.event_start)
                 for i, (frame, metadata) in enumerate(self.work):
-                    # All TP ranks submit the identical sequence of collectives.
-                    if self.owner.diagnostic_max_stages is None:
-                        stop = self.event_end.query() if group.rank_in_group == 0 else None
-                    else:
-                        stop = i >= self.owner.diagnostic_max_stages
-                    if group.broadcast_object(stop, src=0):
+                    stop = None
+                    if group.rank_in_group == 0:
+                        limit = self.owner.diagnostic_max_stages
+                        if self.cancelled.is_set():
+                            stop = "cancelled"
+                        elif self.target_forward_submitted.is_set() and self.event_end.query():
+                            stop = "target_finished"
+                        elif limit is not None and i >= limit:
+                            stop = "diagnostic_limit"
+                        elif i > 0 and self.admission_decision is not None and not self.owner.admission.next_fits(
+                            self.admission_decision, self.target_host_start_ns
+                        ):
+                            stop = "next_step_would_overrun"
+                    self.stop_reason = group.broadcast_object(stop, src=0)
+                    if self.stop_reason is not None:
                         break
                     backend.forward_metadata = metadata
                     if i:
                         frame.input_ids = self.samples[-1][1].reshape(-1)
                     begin = torch.cuda.Event(enable_timing=True)
                     end = torch.cuda.Event(enable_timing=True)
+                    cpu_start = self.owner.spill.cpu_attention_ns
                     begin.record()
                     logits = runner.forward(frame, skip_attn_backend_init=True).logits_output
                     probabilities, tokens = fast_topk(torch.softmax(logits.next_token_logits, dim=-1), 1, dim=-1)
                     end.record()
-                    self.steps.append((begin, end))
+                    self.steps.append((begin, end, self.owner.spill.cpu_attention_ns - cpu_start))
                     self.samples.append((probabilities, tokens, logits.hidden_states))
-                    # A GPU-only forward has no host attention to pace issue.
-                    # Observe its real completion before committing another step.
+                    # Recheck the Target deadline after each complete stage.
+                    # A single stage may run beyond it and is timed separately.
                     end.synchronize()
-            complete = True
         finally:
             backend.forward_metadata = state
-            # Allocator changes and slot reuse are legal again only after every
-            # submitted Draft forward has stopped reading the old history.
-            if complete and self.steps:
-                self.steps[-1][1].synchronize()
-            else:
-                stream.synchronize()
-            self.release_future()
+            # An exception inside a stage can leave queued reads or writes.
+            stream.synchronize()
+            self.draft_host_end_ns = time.monotonic_ns()
         if not self.steps:
             self.skip = "target_already_finished"
 
     def release_future(self):
         if self.extra is not None:
             if len(self.extra):
+                self.released_future_slots = int(np.count_nonzero(self.owner.spill.gpu_map[self.extra]))
                 self.owner.spill._free(self.extra)
-                self.released_future_slots = len(self.extra)
             self.extra = None
 
     def abort(self):
-        self.release_future()
-        if self.verify_slots is not None:
-            self.owner.spill._free(self.verify_slots)
-            self.verify_slots = None
+        self.cancelled.set()
+        try:
+            self.join()
+        finally:
+            self.release_future()
+            if self.verify_slots is not None:
+                self.owner.spill._free(self.verify_slots)
+                self.verify_slots = None
+
+    def keep_partial(self, req, selected, candidates):
+        if not self.owner.partial_enabled or len(candidates) <= 1:
+            return
+        spill = self.owner.spill
+        count = len(candidates) - 1
+        logical = self.extra.reshape(self.cohort_size, -1)[selected, :count]
+        held = spill.gpu_map[logical].copy()
+        if len(held) != count or np.any(held <= 0) or np.any(spill.cpu_map[logical]):
+            raise RuntimeError("Partial Draft KV must remain in tentative GPU slots")
+        tokens = torch.cat([s[1][selected].reshape(-1) for s in self.samples[1:]])
+        self.owner.partial[(req.rid, len(req.output_ids))] = _PartialCandidates(tokens, held)
+        self.owner.partial_spill_map = spill.gpu_map
+        spill.gpu_map[logical] = 0
 
     def reconcile(self, batch, result):
+        try:
+            trace = self.reconcile_branches(batch, result)
+        finally:
+            self.release_future()
+        trace["released_future_slots"] = self.released_future_slots
+        self.owner.write_trace(trace)
+
+    def reconcile_branches(self, batch, result):
         trace = dict(
             timestamp=self.timestamp, round_id=self.owner.round_id,
             batch_size=self.batch_size, q=self.width, enabled=self.owner.enabled,
             skip_reason=self.skip, target_window_completed=0, branches=[],
             cached_candidates_consumed=self.owner.cached_candidates_consumed,
             seed_candidates_consumed=self.owner.seed_candidates_consumed,
+            partial_candidates_consumed=self.owner.partial_candidates_consumed,
+            admission=self.admission_decision,
+            stop_reason=self.stop_reason,
             released_future_slots=self.released_future_slots,
             selected_batch_size=self.cohort_size,
         )
         if self.event_start is None:
-            self.owner.write_trace(trace)
-            return
+            return trace
         target_end = round(self.event_start.elapsed_time(self.event_end) * 1e6)
         trace.update(target_start_ns=0, target_end_ns=target_end,
-                     target_resolve_monotonic_ns=time.monotonic_ns())
+                     target_resolve_monotonic_ns=time.monotonic_ns(),
+                     target_host_submit_ms=(self.target_host_submitted_ns - self.target_host_start_ns) / 1e6,
+                     draft_host_start_offset_ms=(self.draft_host_start_ns - self.target_host_start_ns) / 1e6,
+                     draft_host_execution_ms=(self.draft_host_end_ns - self.draft_host_start_ns) / 1e6)
         if not self.steps:
-            self.owner.write_trace(trace)
-            return
+            return trace
         specs = result.draft_input
         device = self.owner.device
         current = self.current.tolist()
         bonus, *next_candidates = [tokens.reshape(-1).tolist() for _, tokens, _ in self.samples]
         phases = []
-        for i, (begin, end) in enumerate(self.steps):
+        for i, (begin, end, cpu_ns) in enumerate(self.steps):
             phases.append(dict(
                 kind="bonus" if i == 0 else "candidate", candidate_count=int(i != 0),
                 start_ns=round(self.event_start.elapsed_time(begin) * 1e6),
                 end_ns=round(self.event_start.elapsed_time(end) * 1e6),
+                draft_cpu_attention_ms=cpu_ns / 1e6,
             ))
+        if self.owner.admission is not None:
+            self.owner.admission.observe_steps(self.admission_decision, phases)
         ready_count = sum(s["candidate_count"] for s in phases if s["end_ns"] <= target_end)
         trace["target_window_completed"] = ready_count * self.cohort_size
         keep, tail, final, live = [], [], [], []
@@ -480,6 +725,7 @@ class _Round:
                 if reuse_bonus:
                     primed[len(live)] = tuple(t[selected:selected + 1] if t is not None else None
                                               for t in self.samples[1])
+                    self.keep_partial(req, selected, next_candidates)
                     ready_rows.append(selected)
                 else:
                     keep.append(length - committed - 1)
@@ -491,9 +737,11 @@ class _Round:
                 trace["branches"].append(dict(
                     row=i, current=current[selected], verified=verified, bonus=bonus[selected],
                     next_candidates=[step[selected] for step in next_candidates],
-                    retained=int(reuse_bonus), committed=committed, finished=finished,
+                    retained=(len(next_candidates) if reuse_bonus and self.owner.partial_enabled else int(reuse_bonus)),
+                    committed=committed, finished=finished,
                     forked=not matched, steps=phases,
-                    discarded_slots=len(current[selected]) - committed + len(next_candidates) - int(reuse_bonus),
+                    discarded_slots=(len(current[selected]) - committed + len(next_candidates)
+                                     - (len(next_candidates) if reuse_bonus and self.owner.partial_enabled else int(reuse_bonus))),
                     reused_bonus_slot=reuse_bonus,
                 ))
         if offset != specs.verified_id.numel():
@@ -512,4 +760,4 @@ class _Round:
                     torch.as_tensor(final, dtype=torch.int64, device=device), live, primed,
                 )
             self.owner.seeded_requests = set(_request_state(live[i] for i in primed))
-        self.owner.write_trace(trace)
+        return trace
