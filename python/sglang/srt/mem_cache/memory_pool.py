@@ -760,6 +760,8 @@ class MHATokenToKVPool(KVCache):
         enable_kv_cache_copy: bool = False,
         cpu_draft_history: bool = False,
         cpu_draft_tp_rank: int = 0,
+        native_joint_arena=None,
+        native_joint_role: str | None = None,
     ):
         super().__init__(
             size,
@@ -796,7 +798,13 @@ class MHATokenToKVPool(KVCache):
                         size, host_bytes)
             return
 
-        self._create_buffers()
+        if native_joint_arena is not None:
+            if type(self) is not MHATokenToKVPool or page_size != 1 or enable_memory_saver:
+                raise ValueError("Joint KV arena requires a regular page-size-one MHA cache")
+            self.native_joint_arena = native_joint_arena
+            native_joint_arena.bind_pool(native_joint_role, self, size)
+        else:
+            self._create_buffers()
 
         self.device_module = torch.get_device_module(self.device)
         self.alt_stream = (

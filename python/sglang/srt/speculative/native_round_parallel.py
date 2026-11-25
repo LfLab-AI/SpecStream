@@ -92,6 +92,12 @@ class NativeRoundParallel:
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="draft-lookahead") if enabled else None
         self.trace = trace
         self.round_id = 0
+        self.last_round_metrics = None
+        target_only = os.getenv("SPECSTREAM_NATIVE_TARGET_FIRST_LOOKAHEAD", "0")
+        if target_only not in ("0", "1"):
+            raise ValueError("SPECSTREAM_NATIVE_TARGET_FIRST_LOOKAHEAD must be 0 or 1")
+        self.target_only_enabled = target_only == "1"
+        self.target_only_mapping = False
         self.ready = None
         self.trim = None
         self.cached_candidates_consumed = 0
@@ -282,6 +288,7 @@ class NativeRoundParallel:
     def prepare(self, batch, verify_info):
         self.clear_partial()
         self.round_id += 1
+        self.last_round_metrics = None
         self.trim = None
         self.ready = None
         state = _Round(self, batch, verify_info)
@@ -397,16 +404,34 @@ class _Round:
         self.samples = []
         self.steps = []
         self.skip = "disabled"
+        self.activated_gpu_draft_mapping = False
+        self.gpu_only_scratch = False
 
     def prepare(self, batch, info):
         if not self.owner.enabled:
             return
         spill = self.owner.spill
-        if not spill.active or self.worker._native_saved_draft_graphs is None:
+        if not spill.active:
+            self.owner.target_only_mapping = False
+        elif spill.cpu_resident_tokens:
+            self.owner.target_only_mapping = False
+        target_pool = self.worker.target_worker.model_runner.token_to_kv_pool
+        target_spill = getattr(target_pool, "native_target_spill", None)
+        target_only = (
+            not spill.active and self.owner.target_only_enabled
+            and target_spill is not None
+            and target_spill.batch_history_tokens(batch.reqs) > 0
+        )
+        if not target_only and (not spill.active or self.worker._native_saved_draft_graphs is None):
             self.skip = "gpu_only"
             return
         if batch.forward_mode.is_idle() or batch.has_grammar or not batch.reqs:
             self.skip = "unsupported_batch"
+            return
+        # Establishing a remap changes ordinary Draft Graph eligibility. Do
+        # this only after the strict window admission has approved the work.
+        if target_only and not self.owner.partial_enabled:
+            self.skip = "target_only_requires_admission"
             return
         if self.owner.partial_enabled:
             decision = None
@@ -419,9 +444,9 @@ class _Round:
             if self.skip is not None:
                 return
         device = self.owner.device
+        allocator = self.worker.token_to_kv_pool_allocator
         lengths = batch.seq_lens_cpu.tolist()
         context_limit = self.worker.draft_model_runner.model_config.context_len
-        allocator = self.worker.token_to_kv_pool_allocator
         # Future writes use otherwise free logical IDs but are written to a
         # separate Draft pool. They are never published to the shared table.
         table = batch.req_to_token_pool.req_to_token[
@@ -438,11 +463,28 @@ class _Round:
         if not self.rows:
             self.skip = "context_limit"
             return
+        if target_only:
+            # Existing live Draft pages keep their original physical IDs.
+            # No committed KV is transferred to CPU by activate().
+            spill.activate(allocator.free_pages)
+            if spill.cpu_resident_tokens:
+                raise RuntimeError("Draft mapping initialization unexpectedly moved KV to CPU")
+            self.owner.target_only_mapping = True
+            self.activated_gpu_draft_mapping = True
+            self.worker._update_native_draft_graphs()
+        self.gpu_only_scratch = self.owner.target_only_mapping and spill.cpu_resident_tokens == 0
+        rows = torch.tensor(self.rows, dtype=torch.int64, device=device)
+        current = batch.out_cache_loc.view(self.batch_size, self.width).index_select(0, rows).cpu().numpy()
         protected = np.concatenate([row[-128:] for row in history])
         unprotected_gpu = max(0, spill.gpu_slots - len(spill.gpu_free) - int(
             np.count_nonzero(spill.gpu_map[protected])
         ))
         available = len(spill.gpu_free) + min(len(spill.cpu_free), unprotected_gpu)
+        if self.gpu_only_scratch:
+            # The current Target provisional slots were already reserved when
+            # the identity map was established. Future work can use free GPU
+            # pages, but may not evict any committed Draft history.
+            available = len(spill.gpu_free) + int(np.count_nonzero(spill.gpu_map[current]))
         stages = min(self.width - 2, len(allocator.free_pages) // self.cohort_size)
         # Speculation can spill only history which already belongs to a live request.
         # Reduce the scratch horizon if the fixed GPU+CPU budget is tight.
@@ -453,10 +495,11 @@ class _Round:
             return
         # rank-independent sizes come from the same logical allocation and the
         # same deterministic spill policy on every TP rank.
-        rows = torch.tensor(self.rows, dtype=torch.int64, device=device)
-        current = batch.out_cache_loc.view(self.batch_size, self.width).index_select(0, rows).cpu().numpy()
         extra = allocator.free_pages[: stages * self.cohort_size].cpu().numpy()
         targets = np.concatenate((current, extra.reshape(self.cohort_size, stages)), axis=1)
+        if self.gpu_only_scratch and np.count_nonzero(spill.gpu_map[targets] == 0) > len(spill.gpu_free):
+            self.skip = "no_gpu_scratch_capacity"
+            return
         self.verify_slots = current.reshape(-1)
         self.extra = extra
         self.current = info.draft_token.view(self.batch_size, self.width).index_select(0, rows)[:, 1:].contiguous()
@@ -662,6 +705,13 @@ class _Round:
         finally:
             self.release_future()
         trace["released_future_slots"] = self.released_future_slots
+        self.owner.last_round_metrics = dict(
+            target_overlap_ms=trace.get("target_overlap_ms", 0.0),
+            target_window_completed=trace["target_window_completed"],
+            cached_candidates_consumed=trace["cached_candidates_consumed"],
+            partial_candidates_consumed=trace["partial_candidates_consumed"],
+            seed_candidates_consumed=trace["seed_candidates_consumed"],
+        )
         self.owner.write_trace(trace)
 
     def reconcile_branches(self, batch, result):
@@ -676,6 +726,9 @@ class _Round:
             stop_reason=self.stop_reason,
             released_future_slots=self.released_future_slots,
             selected_batch_size=self.cohort_size,
+            activated_gpu_draft_mapping=self.activated_gpu_draft_mapping,
+            gpu_only_scratch=self.gpu_only_scratch,
+            draft_cpu_resident_tokens=self.owner.spill.cpu_resident_tokens,
         )
         if self.event_start is None:
             return trace
@@ -699,6 +752,10 @@ class _Round:
                 end_ns=round(self.event_start.elapsed_time(end) * 1e6),
                 draft_cpu_attention_ms=cpu_ns / 1e6,
             ))
+        trace["target_overlap_ms"] = sum(
+            max(0, min(phase["end_ns"], target_end) - max(0, phase["start_ns"]))
+            for phase in phases
+        ) / 1e6
         if self.owner.admission is not None:
             self.owner.admission.observe_steps(self.admission_decision, phases)
         ready_count = sum(s["candidate_count"] for s in phases if s["end_ns"] <= target_end)

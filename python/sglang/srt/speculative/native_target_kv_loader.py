@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections import deque
 from dataclasses import dataclass
 
@@ -112,7 +113,7 @@ class NativeTargetKVLoader:
     """Copy each packed cohort once so all its queries can reuse the GPU window."""
 
     def __init__(self, history: NativeTargetHostHistory, device, *, stage_tokens=None,
-                 chunk_tokens=None, track_verify_windows=False):
+                 chunk_tokens=None, track_verify_windows=False, host_blocks=False):
         self.history = history
         self.stage_tokens = native_target_stage_tokens() if stage_tokens is None else stage_tokens
         if self.stage_tokens < 1:
@@ -121,6 +122,9 @@ class NativeTargetKVLoader:
         if chunk_tokens < 1:
             raise ValueError("Target cohort chunks must fit one KV token")
         self.chunk_tokens = min(chunk_tokens, self.stage_tokens)
+        self.host_blocks = host_blocks
+        if host_blocks and self.stage_tokens < history.slab_tokens:
+            raise ValueError("Target staging window must fit a whole CPU KV block")
         self.pool = StagingWindowPool(
             TARGET_STAGE_BUFFERS, device, track_h2d_windows=track_verify_windows,
         )
@@ -129,6 +133,7 @@ class NativeTargetKVLoader:
         self.h2d_bytes = 0
         self.cross_layer_bytes = 0
         self.dma_count = 0
+        self.h2d_submit_ns = 0
         self.h2d_chunks = 0  # Pinned source runs passed to the copy stream.
         self.copy_batches = 0  # Bounded windows, each published with one ready event.
         self.d2h_bytes = 0
@@ -136,6 +141,8 @@ class NativeTargetKVLoader:
 
     def prepare(self, cpu_rows: list[np.ndarray]) -> NativeTargetLoadPlan:
         """Describe packed request-order windows with per-request causal metadata."""
+        if self.host_blocks:
+            return self._prepare_block_windows(cpu_rows)
         windows = []
         active = deque((i, 0) for i, row in enumerate(cpu_rows) if len(row))
         while active:
@@ -158,6 +165,50 @@ class NativeTargetKVLoader:
                 lengths[row_index] = end - first
             windows.append(_TargetWindow(tuple(lengths), tuple(runs)))
         return NativeTargetLoadPlan(tuple(windows))
+
+    def _prepare_block_windows(self, cpu_rows: list[np.ndarray]) -> NativeTargetLoadPlan:
+        # Keep cohort scheduling and per-request order. A window may have
+        # spare space when the next block cannot fit without being split.
+        blocks = [deque(self.history.runs(row)) for row in cpu_rows]
+        active = deque(i for i, parts in enumerate(blocks) if parts)
+        windows = []
+        while active:
+            remaining = self.stage_tokens
+            by_request = {}
+            lengths = [0] * len(cpu_rows)
+            while active and remaining:
+                i = active.popleft()
+                parts = blocks[i]
+                if parts[0].length > remaining:
+                    active.appendleft(i)
+                    break
+                selected = by_request.setdefault(i, [])
+                cohort_tokens = 0
+                while parts and parts[0].length <= remaining:
+                    length = parts[0].length
+                    if cohort_tokens and cohort_tokens + length > self.chunk_tokens:
+                        break
+                    selected.append(parts.popleft())
+                    cohort_tokens += length
+                    remaining -= length
+                lengths[i] += cohort_tokens
+                if parts:
+                    active.append(i)
+            runs = tuple(run for i in sorted(by_request) for run in by_request[i])
+            windows.append(_TargetWindow(tuple(lengths), runs))
+        return NativeTargetLoadPlan(tuple(windows))
+
+    def fence_host_reuse(self):
+        # Discarding a prefetch only cancels its consumer, so both completed
+        # and discarded prefetches need the copy-stream fence.
+        if self.prefetched is not None:
+            self.pool.discard(self.prefetched[2])
+            self.prefetched = None
+        if self.pool.copy_stream is None:
+            return None
+        fence = torch.cuda.Event()
+        fence.record(self.pool.copy_stream)
+        return fence
 
     @torch.inference_mode()
     def migrate(self, cache_pool, source: np.ndarray, destination: torch.Tensor) -> None:
@@ -209,9 +260,11 @@ class NativeTargetKVLoader:
         self.d2h_bytes += len(source) * self.history.num_layers * 2 * self.history.kv_heads * self.history.head_dim * self.history.dtype.itemsize
 
     def _submit(self, layer: int, window: _TargetWindow, slot: int, *, cross_layer: bool = False):
+        submit_started = time.perf_counter_ns()
         transfer = self.pool.submit_many(
             self.history.sources(layer, window.runs), slot, round_id=self.verify_timing_round,
         )
+        self.h2d_submit_ns += time.perf_counter_ns() - submit_started
         if self.verify_timing_round is not None and not transfer.h2d_window_id:
             raise RuntimeError("Target verify KV transfer has no CUDA timing events")
         self.h2d_bytes += transfer.nbytes

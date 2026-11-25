@@ -125,14 +125,42 @@ void accumulate_row(const bf16 *q, const bf16 *k, const bf16 *v, const int64_t *
                 denominator[g] += scores[g][n];
             }
         }
-        for (int n=0; n<count; ++n) {
-            const bf16 *value = v + slots[begin+n]*dim;
-            Vec weights[groups];
-            for (int g=0; g<groups; ++g) weights[g]=broadcast(scores[g][n]);
-            for (int j=0; j<dim; j+=width) {
-                const Vec val = load(value+j);
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+        if constexpr (groups == 2 || groups == 4) {
+            // Keep a block of the value sum in registers across the whole KV tile.
+            // Each output dimension sees the same FMAs in the same token order.
+            constexpr int vectors = std::clamp(16 / groups, 1, dim / width);
+            for (int block=0; block<dim; block+=vectors*width) {
+                Vec sums[groups][vectors];
                 for (int g=0; g<groups; ++g)
-                    store(accum[g]+j, muladd(val, weights[g], load(accum[g]+j)));
+                    for (int j=0; j<vectors; ++j)
+                        sums[g][j] = load(accum[g]+block+j*width);
+                for (int n=0; n<count; ++n) {
+                    const bf16 *value = v + slots[begin+n]*dim + block;
+                    Vec weights[groups];
+                    for (int g=0; g<groups; ++g) weights[g] = broadcast(scores[g][n]);
+                    for (int j=0; j<vectors; ++j) {
+                        const Vec val = load(value+j*width);
+                        for (int g=0; g<groups; ++g)
+                            sums[g][j] = muladd(val, weights[g], sums[g][j]);
+                    }
+                }
+                for (int g=0; g<groups; ++g)
+                    for (int j=0; j<vectors; ++j)
+                        store(accum[g]+block+j*width, sums[g][j]);
+            }
+        } else
+#endif
+        {
+            for (int n=0; n<count; ++n) {
+                const bf16 *value = v + slots[begin+n]*dim;
+                Vec weights[groups];
+                for (int g=0; g<groups; ++g) weights[g]=broadcast(scores[g][n]);
+                for (int j=0; j<dim; j+=width) {
+                    const Vec val = load(value+j);
+                    for (int g=0; g<groups; ++g)
+                        store(accum[g]+j, muladd(val, weights[g], load(accum[g]+j)));
+                }
             }
         }
     }

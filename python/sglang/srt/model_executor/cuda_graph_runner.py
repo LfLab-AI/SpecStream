@@ -505,6 +505,10 @@ def _is_spectre(runner) -> bool:
     return getattr(runner, "is_spectre", False)
 
 
+def _uses_multi_width_graphs(runner) -> bool:
+    return _is_spectre(runner) or getattr(runner, "standalone_multi_q", False)
+
+
 class CudaGraphRunner:
     """A CudaGraphRunner runs the forward pass of a model with cuda graph and torch.compile."""
 
@@ -569,14 +573,30 @@ class CudaGraphRunner:
             self.num_tokens_per_bs = self.dllm_config.block_size
 
         self.is_spectre = model_runner.spec_algorithm.is_spectre()
+        self.standalone_multi_q = (
+            model_runner.spec_algorithm.is_standalone()
+            and model_runner.server_args.speculative_eagle_topk == 1
+            and get_bool_env_var("SPECSTREAM_NATIVE_MULTI_Q_GRAPH")
+        )
         if self.is_spectre:
             self.spectre_ntpb_options = sorted(
                 set([1, self.num_tokens_per_bs]), reverse=True
             )
         else:
             self.spectre_ntpb_options = None
+        self.capture_ntpb_options = (
+            [q for q in (8, 6, 4, 2) if q <= self.num_tokens_per_bs]
+            if self.standalone_multi_q
+            else self.spectre_ntpb_options or [self.num_tokens_per_bs]
+        )
         self.actual_ntpb = self.num_tokens_per_bs
         self._captured_attn_tensors = {}
+
+        if self.standalone_multi_q:
+            log_info_on_rank0(
+                logger,
+                f"[SpecStream CudaGraph] Target capture widths={self.capture_ntpb_options}",
+            )
 
         if self.is_spectre:
             log_info_on_rank0(
@@ -695,7 +715,7 @@ class CudaGraphRunner:
         stream_idx: Optional[int] = None,
         ntpb: Optional[int] = None,
     ):
-        if _is_spectre(self) and ntpb is not None:
+        if _uses_multi_width_graphs(self) and ntpb is not None:
             base_key = f"r{ntpb}_{bs}"
         else:
             base_key = bs
@@ -704,7 +724,7 @@ class CudaGraphRunner:
         return base_key
 
     def _get_actual_ntpb(self, forward_batch: ForwardBatch) -> int:
-        if _is_spectre(self):
+        if _uses_multi_width_graphs(self):
             if forward_batch.spec_info is not None:
                 return getattr(
                     forward_batch.spec_info,
@@ -718,6 +738,7 @@ class CudaGraphRunner:
     def can_run(self, forward_batch: ForwardBatch):
         if (
             self.model_runner.spec_algorithm.is_standalone()
+            and not self.standalone_multi_q
             and forward_batch.forward_mode == ForwardMode.TARGET_VERIFY
             and forward_batch.spec_info.draft_token_num != self.num_tokens_per_bs
         ):
@@ -741,7 +762,7 @@ class CudaGraphRunner:
         graph_key = self._make_graph_key(
             cuda_graph_bs,
             stream_idx,
-            actual_ntpb if _is_spectre(self) else None,
+            actual_ntpb if _uses_multi_width_graphs(self) else None,
         )
 
         is_bs_supported = (
@@ -750,7 +771,7 @@ class CudaGraphRunner:
             else cuda_graph_bs <= self.max_bs
         )
 
-        if _is_spectre(self):
+        if _uses_multi_width_graphs(self):
             expected_forward_mode = (
                 ForwardMode.DECODE
                 if actual_ntpb == 1 and forward_batch.spec_info is None
@@ -758,7 +779,7 @@ class CudaGraphRunner:
             )
             is_bs_supported = (
                 is_bs_supported
-                and actual_ntpb in self.spectre_ntpb_options
+                and actual_ntpb in self.capture_ntpb_options
                 and forward_batch.forward_mode == expected_forward_mode
             )
 
@@ -862,12 +883,10 @@ class CudaGraphRunner:
                         f"Capturing batches ({bs=} {avail_mem=:.2f} GB)"
                     )
 
-                is_spectre = _is_spectre(self)
-                ntpb_list = (
-                    getattr(self, "spectre_ntpb_options", None) if is_spectre else None
-                ) or [self.num_tokens_per_bs]
+                multi_width = _uses_multi_width_graphs(self)
+                ntpb_list = getattr(self, "capture_ntpb_options", [self.num_tokens_per_bs])
                 for ntpb in ntpb_list:
-                    if is_spectre:
+                    if multi_width:
                         log_info_on_rank0(
                             logger,
                             f"[Spectre CudaGraph] Capturing: bs={bs}, "
@@ -879,7 +898,7 @@ class CudaGraphRunner:
                         num_tokens=bs * ntpb,
                         tp_group=self.model_runner.tp_group,
                     ) as forward:
-                        if is_spectre:
+                        if multi_width:
                             graph, output_buffers = self.capture_one_batch_size(
                                 bs,
                                 forward,
@@ -1112,7 +1131,7 @@ class CudaGraphRunner:
             spec_info,
         )
 
-        if _is_spectre(self) and ntpb_override is not None:
+        if _uses_multi_width_graphs(self) and ntpb_override is not None:
             capture_key = self._make_graph_key(bs, stream_idx, ntpb_override)
             fwd_meta = attn_backend.forward_metadata
             captured = getattr(self, "_captured_attn_tensors", None)
@@ -1326,7 +1345,7 @@ class CudaGraphRunner:
         graph_key = self._make_graph_key(
             self.bs,
             stream_idx,
-            getattr(self, "actual_ntpb", None) if _is_spectre(self) else None,
+            getattr(self, "actual_ntpb", None) if _uses_multi_width_graphs(self) else None,
         )
 
         self.graphs[graph_key].replay()
@@ -1365,6 +1384,11 @@ class CudaGraphRunner:
             if self.model_runner.is_draft_worker:
                 raise RuntimeError("This should not happen.")
             else:
+                draft_token_num = (
+                    ntpb_override
+                    if ntpb_override is not None
+                    else self.model_runner.server_args.speculative_num_draft_tokens
+                )
                 spec_info = EagleVerifyInput(
                     draft_token=None,
                     custom_mask=self.buffers.custom_mask,
@@ -1373,9 +1397,13 @@ class CudaGraphRunner:
                     retrive_next_token=None,
                     retrive_next_sibling=None,
                     retrive_cum_len=None,
-                    spec_steps=self.model_runner.server_args.speculative_num_steps,
+                    spec_steps=(
+                        draft_token_num - 1
+                        if self.standalone_multi_q
+                        else self.model_runner.server_args.speculative_num_steps
+                    ),
                     topk=self.model_runner.server_args.speculative_eagle_topk,
-                    draft_token_num=self.model_runner.server_args.speculative_num_draft_tokens,
+                    draft_token_num=draft_token_num,
                     capture_hidden_mode=CaptureHiddenMode.FULL,
                     seq_lens_sum=None,
                     seq_lens_cpu=None,

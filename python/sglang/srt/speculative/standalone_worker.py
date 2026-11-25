@@ -93,6 +93,12 @@ class StandaloneWorker(EAGLEWorker):
             )
 
         # Init attention backend and cuda graphs
+        controller_kind = os.getenv("SPECSTREAM_NATIVE_Q_CONTROLLER", "paper")
+        paper_controller = os.getenv("SPECSTREAM_NATIVE_DYNAMIC_Q") == "1" and controller_kind == "paper"
+        if os.getenv("SPECSTREAM_NATIVE_DYNAMIC_Q") == "1" and controller_kind not in ("paper", "feedback"):
+            raise ValueError("SPECSTREAM_NATIVE_Q_CONTROLLER must be paper or feedback")
+        if paper_controller:
+            os.environ["SPECSTREAM_CPU_ATTN_TIMING"] = "1"
         self._native_draft_spill = None
         self._native_pressure_trace = os.getenv("SPECSTREAM_PRESSURE_TRACE") if tp_rank == 0 else None
         self._native_segment_trace = None
@@ -149,17 +155,18 @@ class StandaloneWorker(EAGLEWorker):
         self._native_round_parallel = None
         parallel_setting = os.getenv("SPECSTREAM_NATIVE_ROUND_PARALLEL", "0")
         segment_path = os.getenv("SPECSTREAM_NATIVE_SEGMENT_TRACE")
-        if segment_path:
+        if segment_path or paper_controller:
             from sglang.srt.speculative.native_segment_timing import NativeSegmentTiming
 
             target_runner = self.target_worker.model_runner
-            if (self._native_draft_spill is None
+            if not paper_controller and (self._native_draft_spill is None
                     or not getattr(target_runner.token_to_kv_pool, "native_target_spill", None)
                     or os.getenv("SPECSTREAM_CPU_ATTN_TIMING") != "1"
                     or os.getenv("SPECSTREAM_NATIVE_DYNAMIC_Q") != "1"):
                 raise ValueError("Segment timing requires dynamic-q Target/Draft spill with CPU timing")
             self._native_segment_trace = NativeSegmentTiming(
                 segment_path, tp_rank, int(os.getenv("SPECSTREAM_NATIVE_SEGMENT_STRIDE", "3")),
+                feedback=paper_controller,
             )
             target_runner._native_segment_trace = self._native_segment_trace
         parallel_trace = os.getenv("SPECSTREAM_NATIVE_ROUND_TRACE")
@@ -182,6 +189,12 @@ class StandaloneWorker(EAGLEWorker):
             self._native_round_parallel = NativeRoundParallel(
                 self, parallel_setting == "1", parallel_trace,
             )
+        self._native_joint_resize = None
+        arena = getattr(self.token_to_kv_pool_allocator, "native_joint_kv_arena", None)
+        if arena is not None:
+            from sglang.srt.speculative.native_joint_kv_resize import NativeTargetFirstResize
+
+            self._native_joint_resize = NativeTargetFirstResize(self, arena)
 
     def _update_native_draft_graphs(self):
         spill = self._native_draft_spill
@@ -232,6 +245,70 @@ class StandaloneWorker(EAGLEWorker):
         return super().forward_draft_extend_after_decode(batch)
 
     def forward_batch_generation(self, batch):
+        kv_trace = os.getenv("SPECSTREAM_MATCHED_KV_TRACE") if self.tp_rank == 0 else None
+        mode = batch.forward_mode.name
+        path = os.getenv("SPECSTREAM_MATCHED_DECODE_TRACE")
+        if not path or not batch.forward_mode.is_decode() or batch.is_extend_in_batch:
+            result = self._forward_with_pressure_trace(batch)
+            if kv_trace:
+                self._record_matched_kv(kv_trace, mode)
+            return result
+        batch_size = batch.batch_size()
+        started_unix_ns = time.time_ns()
+        started = time.perf_counter_ns()
+        result = self._forward_with_pressure_trace(batch)
+        duration_ns = time.perf_counter_ns() - started
+        if not hasattr(self, "_matched_decode_round"):
+            self._matched_decode_round = 0
+        self._matched_decode_round += 1
+        row = {
+            "round_id": self._matched_decode_round,
+            "started_unix_ns": started_unix_ns,
+            "duration_ns": duration_ns,
+            "batch_size": batch_size,
+            "output_tokens": int(result.next_token_ids.numel()),
+            "q": getattr(self, "_native_realized_q", self.speculative_num_draft_tokens),
+            "target_graph_replayed": bool(result.can_run_cuda_graph),
+        }
+        with open(f"{path}.tp{self.tp_rank}.jsonl", "a", encoding="utf8") as stream:
+            stream.write(json.dumps(row, separators=(",", ":")) + "\n")
+        if kv_trace:
+            self._record_matched_kv(kv_trace, mode)
+        return result
+
+    def _record_matched_kv(self, path, mode):
+        allocator = self.token_to_kv_pool_allocator
+        logical_used = allocator.size - allocator.available_size()
+        target_pool = self.target_worker.model_runner.token_to_kv_pool
+        draft_pool = self.draft_model_runner.token_to_kv_pool
+        target = getattr(target_pool, "native_target_spill", None)
+        draft = self._native_draft_spill
+
+        def residency(pool, spill):
+            if spill is None or not spill.active:
+                return min(logical_used, pool.size), 0
+            return pool.size - len(spill.gpu_free), spill.cpu_resident_tokens
+
+        tg, tc = residency(target_pool, target)
+        dg, dc = residency(draft_pool, draft)
+        row = {
+            "time_ns": time.time_ns(), "mode": mode, "logical_used_slots": logical_used,
+            "target_gpu_slots": tg, "draft_gpu_slots": dg,
+            "target_cpu_slots": tc, "draft_cpu_slots": dc,
+            "target_split_active": target is not None and target.active,
+            "draft_split_active": draft is not None and draft.active,
+            "target_h2d_bytes": target.h2d_bytes if target else 0,
+        }
+        blocks = target.host_block_pool if target is not None else None
+        if blocks is not None:
+            row.update(target_cpu_live_blocks=blocks.live_blocks,
+                       target_cpu_retired_blocks=blocks.retired_blocks,
+                       target_cpu_backed_blocks=len(target.history.slabs),
+                       target_cpu_block_capacity=blocks.block_capacity)
+        with open(path, "a", encoding="utf8") as stream:
+            stream.write(json.dumps(row, separators=(",", ":")) + "\n")
+
+    def _forward_with_pressure_trace(self, batch):
         trace = self._native_pressure_trace and batch.forward_mode.is_decode()
         batch_size = batch.batch_size() if trace else 0
         spill = self._native_draft_spill
@@ -242,6 +319,8 @@ class StandaloneWorker(EAGLEWorker):
             target_spill.register_requests(batch)
         if self._native_segment_trace is not None:
             self._native_segment_trace.flush()
+        if self._native_joint_resize is not None:
+            self._native_joint_resize.maybe_resize(batch)
         result = super().forward_batch_generation(batch)
         if trace:
             can_run_target_graph = result.can_run_cuda_graph
@@ -258,6 +337,8 @@ class StandaloneWorker(EAGLEWorker):
                 "target_h2d_cross_layer_bytes": target_spill.h2d_cross_layer_bytes if target_spill else 0,
                 "target_h2d_chunks": target_spill.h2d_chunks if target_spill else 0,
                 "target_h2d_copy_batches": target_spill.h2d_copy_batches if target_spill else 0,
+                "target_h2d_dma_count": target_spill.h2d_dma_count if target_spill else 0,
+                "target_h2d_submit_ns": target_spill.h2d_submit_ns if target_spill else 0,
                 "target_gpu_online_merge_calls": target_spill.gpu_online_merge_calls if target_spill else 0,
                 "target_gpu_cohort_calls": target_spill.gpu_cohort_calls if target_spill else 0,
                 "cpu_attention_calls": spill.cpu_attention_calls if spill else 0,

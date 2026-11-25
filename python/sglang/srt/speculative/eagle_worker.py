@@ -341,9 +341,136 @@ class EAGLEWorker(TpModelWorker):
                 f"Capture draft extend cuda graph end. Time elapsed: {time.perf_counter() - tic:.2f} s. mem usage={(before_mem - after_mem):.2f} GB. avail mem={after_mem:.2f} GB."
             )
 
+        if (
+            os.getenv("SPECSTREAM_NATIVE_MULTI_Q_GRAPH") == "1"
+            and os.getenv("SPECSTREAM_NATIVE_DYNAMIC_Q") == "1"
+            and self.speculative_algorithm.is_standalone()
+        ):
+            self._capture_native_dynamic_graphs()
+
+    def _capture_native_dynamic_graphs(self):
+        """Keep the captured inputs and attention metadata separate for each q."""
+        from sglang.srt.model_executor import input_buffers
+
+        if (
+            self.target_worker.device != "cuda"
+            or self.topk != 1
+            or self.page_size != 1
+            or self.speculative_num_draft_tokens != 8
+            or self.server_args.enable_dp_attention
+            or not self.server_args.disable_overlap_schedule
+        ):
+            raise ValueError("Native multi-q graphs require CUDA STANDALONE topk=1 with max q=8")
+
+        original = (
+            self.draft_attn_backend,
+            self.draft_extend_attn_backend,
+            self.cuda_graph_runner,
+            self.cuda_graph_runner_for_draft_extend,
+        )
+        self._native_dynamic_graphs = {8: original}
+        original_steps = self.server_args.speculative_num_steps
+        original_width = self.server_args.speculative_num_draft_tokens
+        shared_inputs = input_buffers._forward_input_buffer_pool
+        try:
+            for width in (6, 4, 2):
+                self.server_args.speculative_num_steps = width - 1
+                self.server_args.speculative_num_draft_tokens = width
+                self.speculative_num_steps = width - 1
+                self.speculative_num_draft_tokens = width
+                self.init_attention_backend()
+                # The shared pool uses field names only. A different q requires
+                # its own extend lengths, positions and attention input buffers.
+                input_buffers._forward_input_buffer_pool = {}
+                proposal = None
+                if width > 2:
+                    proposal = EAGLEDraftCudaGraphRunner(self)
+                extend = EAGLEDraftExtendCudaGraphRunner(self)
+                self._native_dynamic_graphs[width] = (
+                    self.draft_attn_backend,
+                    self.draft_extend_attn_backend,
+                    proposal,
+                    extend,
+                )
+                logger.info("Captured native Draft proposal/extend graphs for q=%s", width)
+        finally:
+            input_buffers._forward_input_buffer_pool = shared_inputs
+            self.server_args.speculative_num_steps = original_steps
+            self.server_args.speculative_num_draft_tokens = original_width
+            self.speculative_num_steps = original_steps
+            self.speculative_num_draft_tokens = original_width
+            (
+                self.draft_attn_backend,
+                self.draft_extend_attn_backend,
+                self.cuda_graph_runner,
+                self.cuda_graph_runner_for_draft_extend,
+            ) = original
+            self.draft_model_runner.draft_attn_backend = self.draft_attn_backend
+
     @property
     def draft_model_runner(self):
         return self.model_runner
+
+    def _native_paper_state(self, batch):
+        pool = self.target_worker.model_runner.token_to_kv_pool
+        target_spill = getattr(pool, "native_target_spill", None)
+        history_tokens = target_spill.batch_history_tokens(batch.reqs) if target_spill is not None else 0
+        token_bytes = pool.layer_num * 2 * pool.head_num * pool.head_dim * pool.dtype.itemsize
+        from sglang.srt.speculative.native_target_kv_loader import native_target_stage_tokens
+
+        stage_tokens = native_target_stage_tokens()
+        draft_spill = getattr(self, "_native_draft_spill", None)
+        parallel = getattr(self, "_native_round_parallel", None)
+        return dict(
+            batch_size=batch.batch_size(),
+            context_tokens=max(batch.seq_lens_cpu.tolist(), default=0),
+            history_tokens=history_tokens,
+            history_bytes=history_tokens * token_bytes,
+            num_chunks=((history_tokens + stage_tokens - 1) // stage_tokens) * pool.layer_num,
+            draft_cpu=bool(draft_spill is not None and draft_spill.cpu_resident_tokens),
+            target_cpu=bool(history_tokens),
+            parallel_allowed=bool(parallel is not None and parallel.enabled),
+        )
+
+    def _native_collect_paper_feedback(self, policy, group):
+        timing = getattr(self, "_native_segment_trace", None)
+        ready = timing.drain_ready() if timing is not None else []
+        rows_by_rank = group.all_gather_object(ready)
+        if self.tp_rank != 0:
+            return
+        pending = getattr(self, "_native_q_timing_pending", None)
+        if pending is None:
+            self._native_q_timing_pending = pending = {}
+        for rank, rows in enumerate(rows_by_rank):
+            for row in rows:
+                pending.setdefault(row["round_id"], {})[rank] = row
+        for round_id in sorted(list(pending)):
+            ranks = pending[round_id]
+            if len(ranks) != len(rows_by_rank):
+                break
+            samples = [ranks[rank] for rank in range(len(rows_by_rank))]
+            first = samples[0]
+            if any((row["batch_size"], row["q"], row["state"]) !=
+                   (first["batch_size"], first["q"], first["state"])
+                   for row in samples):
+                raise RuntimeError("TP dynamic-q timing rounds disagree")
+            clock = ("round_wall_ms" if policy.uses_measured_resident_timing(first["state"])
+                     else "round_elapsed_cuda_ms")
+            critical_rank = max(range(len(samples)), key=lambda rank: samples[rank][clock])
+            sample = dict(samples[critical_rank])
+            # Keep one physically observed timeline for cost feedback. Phase
+            # maxima from different ranks do not compose an observed round.
+            sample["tp_critical_rank"] = critical_rank
+            sample["tp_phase_maxima"] = {field: max(row[field] for row in samples) for field in (
+                "draft_proposal_ms", "post_verify_draft_ms", "target_forward_cuda_ms",
+                "target_h2d_event_ms", "target_h2d_bytes", "target_kv_wait_ms",
+                "draft_cpu_attention_ms", "target_h2d_windows", "round_elapsed_cuda_ms",
+            )}
+            sample["round_host_ms"] = sample["round_wall_ms"]
+            sample["round_wall_ms"] = sample["round_elapsed_cuda_ms"]
+            sample["placement_changed"] = any(row.get("placement_changed", False) for row in samples)
+            policy.observe_timing(sample)
+            del pending[round_id]
 
     def forward_batch_generation(self, batch: ScheduleBatch) -> GenerationBatchResult:
         dynamic_width = (
@@ -365,16 +492,61 @@ class EAGLEWorker(TpModelWorker):
             raise ValueError("Native dynamic q requires ordinary topk=1, page_size=1 STANDALONE with max q=8")
 
         policy = getattr(self, "_native_dynamic_policy", None)
+        controller_kind = os.getenv("SPECSTREAM_NATIVE_Q_CONTROLLER", "paper")
+        paper_controller = controller_kind == "paper"
+        if controller_kind not in ("paper", "feedback"):
+            raise ValueError("SPECSTREAM_NATIVE_Q_CONTROLLER must be paper or feedback")
         if policy is None:
-            self._native_dynamic_policy = policy = NativeDynamicWidth()
+            if paper_controller:
+                from sglang.srt.speculative.native_paper_dynamic_q import NativePaperWidth
+
+                resident = os.getenv("SPECSTREAM_NATIVE_RESIDENT_Q_CONTROL", "measured")
+                if resident not in ("measured", "model"):
+                    raise ValueError("SPECSTREAM_NATIVE_RESIDENT_Q_CONTROL must be measured or model")
+                self._native_dynamic_policy = policy = NativePaperWidth(measured_resident=(resident == "measured"))
+            else:
+                self._native_dynamic_policy = policy = NativeDynamicWidth()
             self._native_dynamic_backends = {}
         size = batch.batch_size()
-        width = policy.choose(size) if self.tp_rank == 0 else None
-        width = self.target_worker.model_runner.tp_group.broadcast_object(width, src=0)
+        group = self.target_worker.model_runner.tp_group
+        state = self._native_paper_state(batch) if paper_controller else None
+        self._native_q_round_id = getattr(self, "_native_q_round_id", 0) + 1
+        decision = None
+        if paper_controller:
+            if self.tp_rank == 0:
+                warm = policy.is_warming_up(state)
+                decision = policy.choose(state)
+                feedback_stride = 16
+                if warm:
+                    feedback_stride = 8 if policy.uses_measured_resident_timing(state) else 4
+                selection = (
+                    decision.q, policy.needs_timing(state, decision.q),
+                    self._native_q_round_id % feedback_stride == 0,
+                )
+            else:
+                selection = None
+            width, sample_timing, collect_timing = group.broadcast_object(selection, src=0)
+            # Reuse the q broadcast to agree on a small CPU collective. Only
+            # completed events are read, and feedback affects the next choice.
+            if collect_timing:
+                self._native_collect_paper_feedback(policy, group)
+        else:
+            width = policy.choose(size) if self.tp_rank == 0 else None
+            width = group.broadcast_object(width, src=0)
+            sample_timing = None
         self._native_realized_q = width
+        self._native_proposal_graph_replayed = False
+        self._native_extend_graph_replayed = False
 
         original_backend = self.draft_attn_backend
-        if width != 8:
+        original_extend_backend = self.draft_extend_attn_backend
+        dynamic_graphs = getattr(self, "_native_dynamic_graphs", None)
+        if dynamic_graphs is not None:
+            self.draft_attn_backend, self.draft_extend_attn_backend = dynamic_graphs[width][:2]
+            self.draft_model_runner.draft_attn_backend = self.draft_attn_backend
+            self.speculative_num_steps = width - 1
+            self.speculative_num_draft_tokens = width
+        elif width != 8:
             backends = self._native_dynamic_backends
             if width not in backends:
                 backends[width] = DraftBackendFactory(
@@ -389,19 +561,32 @@ class EAGLEWorker(TpModelWorker):
         timestamp = time.time()
         segment = getattr(self, "_native_segment_trace", None)
         if segment is not None:
-            segment.begin(timestamp, size, width, self._native_draft_spill)
+            segment.begin(timestamp, size, width, self._native_draft_spill,
+                          state=state, sample=sample_timing)
         try:
             result = self._forward_speculative_batch(batch)
         finally:
             self.speculative_num_steps = 7
             self.speculative_num_draft_tokens = 8
             self.draft_attn_backend = original_backend
+            self.draft_extend_attn_backend = original_extend_backend
             self.draft_model_runner.draft_attn_backend = original_backend
         elapsed_ms = (time.perf_counter() - before) * 1e3
+        useful_output = result.next_token_ids.numel()
         if segment is not None:
-            segment.finish(elapsed_ms, result.num_accepted_tokens, self._native_draft_spill)
+            parallel = getattr(self, "_native_round_parallel", None)
+            segment.finish(
+                elapsed_ms, result.num_accepted_tokens, self._native_draft_spill,
+                useful_output=useful_output,
+                accepted_lengths=result.accept_length_per_req_cpu,
+                lookahead_metrics=parallel.last_round_metrics if parallel is not None else None,
+                actual_state=self._native_paper_state(batch) if paper_controller else None,
+            )
         if self.tp_rank == 0:
-            policy.update(size, width, elapsed_ms, result.num_accepted_tokens)
+            if paper_controller:
+                policy.record_acceptance(state, width, result.accept_length_per_req_cpu)
+            else:
+                policy.update(size, width, elapsed_ms, result.num_accepted_tokens)
             trace_path = os.getenv("SPECSTREAM_NATIVE_DYNAMIC_TRACE")
             if trace_path:
                 row = dict(
@@ -409,8 +594,14 @@ class EAGLEWorker(TpModelWorker):
                     batch_size=size,
                     q=width,
                     committed_draft=result.num_accepted_tokens,
+                    useful_output_tokens=useful_output,
+                    accepted_lengths=result.accept_length_per_req_cpu,
+                    q_controller=controller_kind,
+                    state=state,
+                    decision=policy.describe_decision() if paper_controller else None,
                     target_graph_replayed=bool(result.can_run_cuda_graph),
                     proposal_graph_replayed=self._native_proposal_graph_replayed,
+                    extend_graph_replayed=self._native_extend_graph_replayed,
                 )
                 with open(trace_path, "a", encoding="utf8") as trace:
                     trace.write(json.dumps(row, separators=(",", ":")) + "\n")
@@ -473,7 +664,8 @@ class EAGLEWorker(TpModelWorker):
             ), speculative_moe_backend_context(), speculative_moe_a2a_backend_context():
                 if draft_trace is not None:
                     draft_start = draft_trace.start()
-                spec_info = self.draft(batch)
+                with segment.proposal_draft() if segment is not None else nullcontext():
+                    spec_info = self.draft(batch)
                 if draft_trace is not None:
                     trace_proposal = draft_trace.stop(draft_start)
             logits_output, verify_output, model_worker_batch, can_run_cuda_graph = (
@@ -727,13 +919,18 @@ class EAGLEWorker(TpModelWorker):
         forward_batch = ForwardBatch.init_new(
             model_worker_batch, self.draft_model_runner
         )
+        graph_runner = self.cuda_graph_runner
+        dynamic_graphs = getattr(self, "_native_dynamic_graphs", None)
+        if graph_runner is not None and dynamic_graphs is not None:
+            graph_runner = dynamic_graphs[self.speculative_num_draft_tokens][2]
         can_cuda_graph = (
-            self.speculative_num_draft_tokens == self.server_args.speculative_num_draft_tokens
-            and self.cuda_graph_runner and self.cuda_graph_runner.can_run(forward_batch)
+            graph_runner is not None
+            and graph_runner.speculative_num_steps == self.speculative_num_steps
+            and graph_runner.can_run(forward_batch)
         )
         self._native_proposal_graph_replayed = bool(can_cuda_graph)
         if can_cuda_graph:
-            parent_list, top_scores_index, draft_tokens = self.cuda_graph_runner.replay(
+            parent_list, top_scores_index, draft_tokens = graph_runner.replay(
                 forward_batch
             )
         else:
@@ -909,7 +1106,7 @@ class EAGLEWorker(TpModelWorker):
             if segment.active is not None:
                 segment.active.lookahead_admitted = branch is not None and branch.skip is None
             target_pool = self.target_worker.model_runner.token_to_kv_pool
-            target_stage = segment.target_stage(target_pool.native_target_spill)
+            target_stage = segment.target_stage(getattr(target_pool, "native_target_spill", None))
         try:
             with target_stage:
                 if branch is not None:
@@ -1164,13 +1361,18 @@ class EAGLEWorker(TpModelWorker):
             forward_batch.seq_lens_sum = batch.seq_lens.sum().item()
 
         # Run
+        graph_runner = self.cuda_graph_runner_for_draft_extend
+        dynamic_graphs = getattr(self, "_native_dynamic_graphs", None)
+        if graph_runner is not None and dynamic_graphs is not None:
+            graph_runner = dynamic_graphs[self.speculative_num_draft_tokens][3]
         can_cuda_graph = (
-            self.speculative_num_draft_tokens == self.server_args.speculative_num_draft_tokens
-            and self.cuda_graph_runner_for_draft_extend
-            and self.cuda_graph_runner_for_draft_extend.can_run(forward_batch)
+            graph_runner is not None
+            and graph_runner.speculative_num_steps == self.speculative_num_steps
+            and graph_runner.can_run(forward_batch)
         )
+        self._native_extend_graph_replayed = bool(can_cuda_graph)
         if can_cuda_graph:
-            logits_output = self.cuda_graph_runner_for_draft_extend.replay(
+            logits_output = graph_runner.replay(
                 forward_batch
             )
             forward_batch.spec_info.topk_p, forward_batch.spec_info.topk_index = (

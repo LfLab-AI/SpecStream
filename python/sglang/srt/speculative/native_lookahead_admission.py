@@ -28,6 +28,10 @@ class LookaheadAdmission:
         profile = self.profiles.get(key)
         if profile is None:
             return {"key": key, "skip": "no_window_profile"}
+        if batch_size != profile.get("required_batch_size", batch_size):
+            return {"key": key, "skip": "profile_batch_mismatch"}
+        if target_host_tokens < profile.get("min_target_host_tokens", 0):
+            return {"key": key, "skip": "below_calibrated_target_history"}
         if self.cooldown[key]:
             self.cooldown[key] -= 1
             return {"key": key, "skip": "h2d_slowdown_backoff"}

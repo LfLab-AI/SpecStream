@@ -33,6 +33,15 @@ FALLBACK = "FALLBACK"
 
 
 @dataclass(frozen=True)
+class CandidateControllerCost:
+    q: int
+    parallel_ms_per_useful_token: float
+    ordinary_ms_per_useful_token: float
+    verify_ms: float
+    draft_rtt_ms: float
+
+
+@dataclass(frozen=True)
 class SpecStreamDecision:
     q: int
     mode: str
@@ -41,6 +50,9 @@ class SpecStreamDecision:
     coexec_mode: str = COEXEC
     rank_skew_ms: float = 0.0
     target_slowdown: float = 0.0
+    parallel_cost: float = 0.0
+    ordinary_cost: float = 0.0
+    candidate_costs: tuple[CandidateControllerCost, ...] = ()
 
 
 class IOAwareController:
@@ -66,6 +78,7 @@ class IOAwareController:
         target_slowdown_budget: float = 0.10,
         single_gpu_policy: SingleGPUCoexecPolicy | None = None,
         multi_gpu_policy: MultiGPUTPPolicy | None = None,
+        draft_rtt_warmup_samples: int = 4,
     ) -> None:
         self.q_candidates = tuple(sorted(set(int(q) for q in q_candidates)))
         if not self.q_candidates or any(q < 1 for q in self.q_candidates):
@@ -84,6 +97,8 @@ class IOAwareController:
             raise ValueError("tp_straggler_budget_ms cannot be negative")
         if target_slowdown_budget < 0:
             raise ValueError("target_slowdown_budget cannot be negative")
+        if draft_rtt_warmup_samples < 1:
+            raise ValueError("draft_rtt_warmup_samples must be positive")
         self.switch_threshold = switch_threshold
         self.draft_pressure_ratio = float(draft_pressure_ratio)
         self.draft_timeout_rate_threshold = float(draft_timeout_rate_threshold)
@@ -92,6 +107,7 @@ class IOAwareController:
         self.compute_ratio_threshold = float(compute_ratio_threshold)
         self.tp_straggler_budget_ms = float(tp_straggler_budget_ms)
         self.target_slowdown_budget = float(target_slowdown_budget)
+        self.draft_rtt_warmup_samples = int(draft_rtt_warmup_samples)
         # Step 2 and Step 3 are separate optional policies.  The legacy
         # phase_gating flag still creates the Step 2 policy for compatibility.
         self.single_gpu_policy = single_gpu_policy
@@ -126,11 +142,14 @@ class IOAwareController:
             total_count=total_count,
         )
         if missing_count > 0:
-            # Batch-uniform verification makes one request-level miss a batch
-            # fallback.  Four AR rounds drain work without permanently
-            # disabling the Drafter; larger missing fractions back off longer.
             missing_ratio = max(int(missing_count), 0) / max(int(total_count), 1)
-            penalty = 4 + min(12, int(round(12 * missing_ratio)))
+            # A minority miss is repaired per request by a full-context resync;
+            # it must not force unrelated requests into global q=1 backoff.
+            # Back off only for a majority outage, and cap the drain period so
+            # one long-context tail event cannot create hundreds of AR rounds.
+            if missing_ratio <= 0.5:
+                return
+            penalty = 2 + min(4, int(round(4 * missing_ratio)))
             self._draft_backoff_rounds = max(self._draft_backoff_rounds, penalty)
 
     def record_draft_reject(self) -> None:
@@ -155,6 +174,7 @@ class IOAwareController:
         acceptance: AcceptanceSnapshot,
         *,
         allow_ordinary: bool = True,
+        force_ordinary: bool = False,
         draft_load: DraftLoadSnapshot | None = None,
         tp_snapshot: TPStragglerSnapshot | None = None,
     ) -> SpecStreamDecision:
@@ -189,7 +209,7 @@ class IOAwareController:
 
         max_q = max(self.q_candidates)
         coexec_mode = COEXEC
-        force_ordinary = False
+        force_ordinary = bool(force_ordinary)
         reason = "minimum_estimated_cost"
 
         tp_constraint = (
@@ -213,7 +233,7 @@ class IOAwareController:
             and tp_constraint.reason != "minimum_estimated_cost"
         ):
             max_q = tp_constraint.max_q
-            force_ordinary = tp_constraint.force_ordinary
+            force_ordinary = force_ordinary or tp_constraint.force_ordinary
             coexec_mode = tp_constraint.coexec_mode
             reason = tp_constraint.reason
         elif self.single_gpu_policy is not None:
@@ -225,6 +245,18 @@ class IOAwareController:
             max_q = single_constraint.max_q
             coexec_mode = single_constraint.coexec_mode
             reason = single_constraint.reason
+
+        # PCIe-slack co-execution is only useful after at least one request in
+        # the batch has published CPU-resident History KV.  Before that point
+        # there is no History-H2D transfer window for the colocated Drafter to
+        # fill.  Letting the generic cost model select ``parallel`` here adds
+        # ZMQ/MPS scheduling overhead and can make the Drafter contend with the
+        # Target despite there being no offload benefit.  Keep dynamic-q, but
+        # restrict this round to SPECTRE ordinary (serial) execution.
+        if batch_state.history_tokens <= 0:
+            force_ordinary = True
+            coexec_mode = SERIALIZE
+            reason = "no_offloaded_history"
         eligible_q = tuple(q for q in self.q_candidates if q <= max_q)
         if not eligible_q:
             eligible_q = (min(self.q_candidates),)
@@ -232,9 +264,27 @@ class IOAwareController:
             max(eligible_q) < max(self.q_candidates) or coexec_mode != COEXEC
         )
 
+        candidate_estimates = {
+            q: estimate_candidate_cost(q, batch_state, profile, acceptance)
+            for q in eligible_q
+        }
+        candidate_costs = tuple(
+            CandidateControllerCost(
+                q=q,
+                parallel_ms_per_useful_token=(
+                    candidate_estimates[q].parallel_ms_per_useful_token
+                ),
+                ordinary_ms_per_useful_token=(
+                    candidate_estimates[q].ordinary_ms_per_useful_token
+                ),
+                verify_ms=candidate_estimates[q].verify_ms,
+                draft_rtt_ms=candidate_estimates[q].draft_ms,
+            )
+            for q in eligible_q
+        )
         candidates: list[SpecStreamDecision] = []
         for q in eligible_q:
-            cost = estimate_candidate_cost(q, batch_state, profile, acceptance)
+            cost = candidate_estimates[q]
             if not force_ordinary:
                 candidates.append(
                     SpecStreamDecision(
@@ -245,6 +295,9 @@ class IOAwareController:
                         coexec_mode,
                         rank_skew_ms,
                         target_slowdown,
+                        cost.parallel_ms_per_useful_token,
+                        cost.ordinary_ms_per_useful_token,
+                        candidate_costs,
                     )
                 )
             if allow_ordinary:
@@ -257,33 +310,93 @@ class IOAwareController:
                         SERIALIZE,
                         rank_skew_ms,
                         target_slowdown,
+                        cost.parallel_ms_per_useful_token,
+                        cost.ordinary_ms_per_useful_token,
+                        candidate_costs,
                     )
                 )
 
-        best = min(candidates, key=lambda item: item.estimated_cost)
-        previous = next(
-            (
-                item
-                for item in candidates
-                if item.q == self._last.q
-                and item.mode == self._last.mode
-                and item.coexec_mode == self._last.coexec_mode
-            ),
-            None,
-        )
-        if previous is not None and previous.estimated_cost > 0:
-            relative_gain = (
-                previous.estimated_cost - best.estimated_cost
-            ) / previous.estimated_cost
-            if relative_gain < self.switch_threshold:
+        under_sampled_q = [
+            q
+            for q in eligible_q
+            if profile.draft_rtt_sample_count(q) < self.draft_rtt_warmup_samples
+        ]
+        if len(self.q_candidates) > 1 and under_sampled_q:
+            # A candidate-specific cost model needs candidate-specific data.
+            # Round-robin the least-sampled horizons for a bounded warmup,
+            # bypassing hysteresis so every configured q becomes observable.
+            exploratory_q = min(
+                under_sampled_q,
+                key=lambda q: (profile.draft_rtt_sample_count(q), q),
+            )
+            exploratory = [item for item in candidates if item.q == exploratory_q]
+            selected = min(exploratory, key=lambda item: item.estimated_cost)
+            best = SpecStreamDecision(
+                selected.q,
+                selected.mode,
+                ("draft_rtt_warmup" if reason == "minimum_estimated_cost" else reason),
+                selected.estimated_cost,
+                selected.coexec_mode,
+                rank_skew_ms,
+                target_slowdown,
+                selected.parallel_cost,
+                selected.ordinary_cost,
+                selected.candidate_costs,
+            )
+        else:
+            max_eligible_q = max(eligible_q)
+            max_q_samples = int(acceptance.samples.get(max_eligible_q, 0))
+            if (
+                batch_state.history_tokens > 0
+                and not pressure_limited
+                and max_q_samples < 8
+            ):
+                # Do not let one unlucky first q=max sample permanently lock the
+                # controller into shorter blocks. History I/O is paid once per
+                # verify round, so q=max needs a small, bounded evidence window
+                # before measured acceptance can fairly rule it out.
+                exploratory = [item for item in candidates if item.q == max_eligible_q]
+                selected = min(exploratory, key=lambda item: item.estimated_cost)
                 best = SpecStreamDecision(
-                    previous.q,
-                    previous.mode,
-                    "hysteresis_hold",
-                    previous.estimated_cost,
-                    previous.coexec_mode,
+                    selected.q,
+                    selected.mode,
+                    "max_q_acceptance_warmup",
+                    selected.estimated_cost,
+                    selected.coexec_mode,
                     rank_skew_ms,
                     target_slowdown,
+                    selected.parallel_cost,
+                    selected.ordinary_cost,
+                    selected.candidate_costs,
                 )
+            else:
+                best = min(candidates, key=lambda item: item.estimated_cost)
+                previous = next(
+                    (
+                        item
+                        for item in candidates
+                        if item.q == self._last.q
+                        and item.mode == self._last.mode
+                        and item.coexec_mode == self._last.coexec_mode
+                    ),
+                    None,
+                )
+                if previous is not None and previous.estimated_cost > 0:
+                    relative_gain = (
+                        previous.estimated_cost - best.estimated_cost
+                    ) / previous.estimated_cost
+                    if relative_gain < self.switch_threshold:
+                        best = SpecStreamDecision(
+                            previous.q,
+                            previous.mode,
+                            "hysteresis_hold",
+                            previous.estimated_cost,
+                            previous.coexec_mode,
+                            rank_skew_ms,
+                            target_slowdown,
+                            previous.parallel_cost,
+                            previous.ordinary_cost,
+                            previous.candidate_costs,
+                        )
         self._last = best
         return best

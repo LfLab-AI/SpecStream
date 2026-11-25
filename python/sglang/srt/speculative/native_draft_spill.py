@@ -47,6 +47,7 @@ class NativeDraftSpill:
         self.pool = pool
         self.logical_slots = logical_slots
         self.gpu_slots = pool.size
+        self.cpu_capacity = logical_slots
         self.rank = rank
         self.tp_threads = tp_threads
         self.gpu_map = None
@@ -75,7 +76,7 @@ class NativeDraftSpill:
     def cpu_resident_tokens(self):
         if not self.active:
             return 0
-        return self.logical_slots - self.gpu_slots - len(self.cpu_free)
+        return self.cpu_capacity - len(self.cpu_free)
 
     @property
     def cpu_attention_ns(self):
@@ -95,7 +96,9 @@ class NativeDraftSpill:
         if self.prefer_prompt_gpu:
             self.prompt_priority = np.zeros(self.logical_slots + 1, dtype=np.uint8)
         self.gpu_free = low_free[::-1].tolist()
-        capacity = self.logical_slots - self.gpu_slots
+        # GPU ownership may change later. Host addresses stay valid for the
+        # full logical lifetime, including after GPU capacity is returned.
+        capacity = self.cpu_capacity
         self.cpu_free = list(range(capacity, 0, -1))
         self.history = CpuHistoryAttention(
             self.pool.layer_num, capacity + 1, self.pool.head_num,
@@ -129,6 +132,36 @@ class NativeDraftSpill:
         if self.tentative is not None:
             self._free(self.tentative)
             self.tentative = None
+
+    def _check_resize_safety(self):
+        if not self.active:
+            return
+        if self.tentative is not None:
+            raise RuntimeError("KV capacity cannot change while tentative Draft writes are live")
+        physical = self.gpu_map[self.gpu_map > 0]
+        free = np.asarray(self.gpu_free, dtype=np.int64)
+        if (
+            len(physical) + len(free) != self.gpu_slots
+            or len(np.unique(physical)) != len(physical)
+            or len(np.unique(free)) != len(free)
+            or np.any(physical > self.gpu_slots)
+            or np.any(free <= 0)
+            or np.any(free > self.gpu_slots)
+            or np.intersect1d(physical, free).size
+        ):
+            raise RuntimeError("KV capacity cannot change while GPU scratch is detached or ownership is inconsistent")
+
+    def grow_gpu(self, new_slots):
+        """Publish new free pages after the arena has enlarged this GPU backing."""
+        new_slots = int(new_slots)
+        old_slots = self.gpu_slots
+        if not old_slots <= new_slots <= min(self.logical_slots, self.pool.size):
+            raise ValueError("New Draft capacity must fit its rebound GPU backing")
+        self._check_resize_safety()
+        if self.active:
+            self.gpu_free.extend(range(old_slots + 1, new_slots + 1))
+        self.gpu_slots = new_slots
+        return dict(old_slots=old_slots, new_slots=new_slots, added_slots=new_slots - old_slots)
 
     def _allocate_writes(self, writes, protected):
         new = writes[self.gpu_map[writes] == 0]

@@ -1698,7 +1698,7 @@ class FlashAttentionBackend(AttentionBackend):
                         "swa_page_table"
                     ][:bs, :]
 
-                self.target_verify_metadata[bs] = metadata
+                self.target_verify_metadata[(bs, num_draft_tokens)] = metadata
             else:
                 # When topk > 1, we need two specific target verify metadata, and then merge states
                 # 1. The first half of metadata for prefix tokens
@@ -1940,20 +1940,11 @@ class FlashAttentionBackend(AttentionBackend):
             )
 
             if self.topk <= 1:
-                metadata = self.target_verify_metadata[bs]
+                metadata = self.target_verify_metadata[(bs, num_draft_tokens)]
                 metadata.cache_seqlens_int32.copy_((seq_lens + num_draft_tokens))
 
                 metadata.max_seq_len_k = seq_lens_cpu.max().item() + num_draft_tokens
-                # Update max_seq_len_q for dynamic draft_token_num
-                metadata.max_seq_len_q = num_draft_tokens
-                # Recompute cu_seqlens_q for dynamic draft_token_num
-                metadata.cu_seqlens_q = torch.arange(
-                    0,
-                    bs * num_draft_tokens + 1,
-                    num_draft_tokens,
-                    dtype=torch.int32,
-                    device=device,
-                )
+                # The captured graph reads this width's original cu_seqlens_q address.
                 metadata.cu_seqlens_k[1:].copy_(
                     torch.cumsum(metadata.cache_seqlens_int32, dim=0, dtype=torch.int32)
                 )

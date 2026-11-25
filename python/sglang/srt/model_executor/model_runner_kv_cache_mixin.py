@@ -740,10 +740,17 @@ class ModelRunnerKVCacheMixin:
                         from sglang.srt.speculative.native_draft_spill import native_draft_gpu_slots
 
                         physical_slots = native_draft_gpu_slots(self)
+                    joint_arena = None
+                    if os.getenv("SPECSTREAM_NATIVE_JOINT_KV_GIB"):
+                        from sglang.srt.speculative.native_joint_kv_resize import create_joint_arena
+
+                        joint_arena = create_joint_arena(self)
                     self.token_to_kv_pool = MHATokenToKVPool(
                         physical_slots,
                         cpu_draft_history=self._uses_cpu_draft_history(),
                         cpu_draft_tp_rank=self.tp_rank,
+                        native_joint_arena=joint_arena,
+                        native_joint_role="draft" if self.is_draft_worker else "target",
                         page_size=self.page_size,
                         dtype=self.kv_cache_dtype,
                         head_num=self.model_config.get_num_kv_heads(
@@ -922,10 +929,16 @@ class ModelRunnerKVCacheMixin:
                 or allocator.need_sort
             ):
                 raise ValueError("Native Target overflow requires ordinary logical slot allocation with a split MHA pool")
-            spill = NativeTargetSpill(pool, allocator.size, self.tp_rank,
-                                      tp_threads=int(os.getenv("SPECSTREAM_CPU_ATTN_THREADS", "16")))
+            spill = NativeTargetSpill(
+                pool, allocator.size, self.tp_rank,
+                tp_threads=int(os.getenv("SPECSTREAM_CPU_ATTN_THREADS", "16")),
+                max_requests=self.req_to_token_pool.size,
+            )
             pool.native_target_spill = spill
             allocator.native_target_spill = spill
+            joint_arena = getattr(pool, "native_joint_arena", None)
+            if joint_arena is not None:
+                allocator.native_joint_kv_arena = joint_arena
 
     def _resolve_memory_pool_config(
         self: ModelRunner, pre_model_load_memory: int
