@@ -90,6 +90,13 @@ class NativeRoundParallel:
             self.stream = self._spatial_streams[1]
         self.tp_group = make_lookahead_tp_group(worker.target_worker.model_runner.tp_group) if enabled else None
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="draft-lookahead") if enabled else None
+        self.process_executor = None
+        if enabled and os.getenv("SPECSTREAM_NATIVE_LOOKAHEAD_PROCESS", "0") == "1":
+            from sglang.srt.speculative.native_mps_draft_executor import NativeMPSDraftExecutor
+
+            if sm_limit or os.getenv("SPECSTREAM_NATIVE_JOINT_KV_GIB"):
+                raise ValueError("Native MPS lookahead requires unlimited SMs and a fixed KV layout")
+            self.process_executor = NativeMPSDraftExecutor(worker.draft_model_runner, self.tp_group)
         self.trace = trace
         self.round_id = 0
         self.last_round_metrics = None
@@ -389,6 +396,8 @@ class _Round:
         self.cohort_size = 0
         self.output_starts = [len(req.output_ids) for req in batch.reqs]
         self.event_start = self.event_end = None
+        self.process_target_start_ns = None
+        self.process_target_end_ns = None
         self.target_forward_submitted = threading.Event()
         self.cancelled = threading.Event()
         self.future = None
@@ -598,7 +607,20 @@ class _Round:
         self.event_end.record()
         self.target_host_submitted_ns = time.monotonic_ns()
         self.target_forward_submitted.set()
-        self.join()
+        observer = None
+        if self.owner.process_executor is not None:
+            def observe_target_completion():
+                with torch.cuda.device(self.owner.device):
+                    self.event_end.synchronize()
+                self.process_target_end_ns = time.monotonic_ns()
+
+            observer = threading.Thread(target=observe_target_completion, daemon=True)
+            observer.start()
+        try:
+            self.join()
+        finally:
+            if observer is not None:
+                observer.join()
 
     def join(self):
         if self.future is None:
@@ -627,7 +649,14 @@ class _Round:
                 torch.cuda.stream(stream),
                 use_lookahead_tp_group(group),
             ):
-                stream.wait_event(self.event_start)
+                process = self.owner.process_executor
+                if process is None:
+                    stream.wait_event(self.event_start)
+                else:
+                    # Protect IPC reads of the parent-created descriptor and
+                    # provisional pages with the same Target-start dependency.
+                    self.event_start.synchronize()
+                    self.process_target_start_ns = time.monotonic_ns()
                 for i, (frame, metadata) in enumerate(self.work):
                     stop = None
                     if group.rank_in_group == 0:
@@ -648,6 +677,13 @@ class _Round:
                     backend.forward_metadata = metadata
                     if i:
                         frame.input_ids = self.samples[-1][1].reshape(-1)
+                    if process is not None:
+                        begin_ns, end_ns, probabilities, tokens, hidden = process.forward(
+                            frame, metadata, reuse_previous=bool(i)
+                        )
+                        self.steps.append((begin_ns, end_ns, 0))
+                        self.samples.append((probabilities, tokens, hidden))
+                        continue
                     begin = torch.cuda.Event(enable_timing=True)
                     end = torch.cuda.Event(enable_timing=True)
                     cpu_start = self.owner.spill.cpu_attention_ns
@@ -745,11 +781,22 @@ class _Round:
         current = self.current.tolist()
         bonus, *next_candidates = [tokens.reshape(-1).tolist() for _, tokens, _ in self.samples]
         phases = []
+        is_process = self.owner.process_executor is not None
+        anchor = None
+        if is_process:
+            # Same-host monotonic clock with each GPU range reconstructed
+            # from its own CUDA events and observed device completion.
+            start_anchor = self.process_target_start_ns
+            end_anchor = self.process_target_end_ns - target_end
+            anchor = min(start_anchor, end_anchor)
+            trace["overlap_timing_source"] = "cuda_events_anchored_to_host_completion"
+            trace["overlap_anchor_difference_ms"] = abs(start_anchor - end_anchor) / 1e6
+            trace["draft_process_pid"] = self.owner.process_executor.pid
         for i, (begin, end, cpu_ns) in enumerate(self.steps):
             phases.append(dict(
                 kind="bonus" if i == 0 else "candidate", candidate_count=int(i != 0),
-                start_ns=round(self.event_start.elapsed_time(begin) * 1e6),
-                end_ns=round(self.event_start.elapsed_time(end) * 1e6),
+                start_ns=begin - anchor if is_process else round(self.event_start.elapsed_time(begin) * 1e6),
+                end_ns=end - anchor if is_process else round(self.event_start.elapsed_time(end) * 1e6),
                 draft_cpu_attention_ms=cpu_ns / 1e6,
             ))
         trace["target_overlap_ms"] = sum(

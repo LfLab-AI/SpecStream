@@ -480,7 +480,16 @@ class EAGLEWorker(TpModelWorker):
             and not batch.is_extend_in_batch
         )
         if not dynamic_width:
-            return self._forward_speculative_batch(batch)
+            segment = getattr(self, "_native_segment_trace", None)
+            if segment is None or not batch.forward_mode.is_decode() or batch.is_extend_in_batch:
+                return self._forward_speculative_batch(batch)
+            before = time.perf_counter()
+            segment.begin(time.time(), batch.batch_size(), self.speculative_num_draft_tokens,
+                          self._native_draft_spill)
+            result = self._forward_speculative_batch(batch)
+            segment.finish((time.perf_counter() - before) * 1e3, result.num_accepted_tokens,
+                           self._native_draft_spill)
+            return result
 
         if (
             self.topk != 1
