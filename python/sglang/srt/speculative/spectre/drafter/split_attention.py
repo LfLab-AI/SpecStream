@@ -27,6 +27,7 @@ class SplitDraftAttention:
         self.buffers = {}
         self.time_cpu_attention = os.getenv("SPECSTREAM_CPU_ATTN_TIMING", "0") == "1"
         self.cpu_attention_ns = 0
+        self.cpu_attention_intervals = None
 
     def _pinned(self, name, shape, dtype):
         size = shape.numel()
@@ -66,16 +67,21 @@ class SplitDraftAttention:
             self.upload_done.synchronize()
         host_out = self._pinned("out", q.shape, torch.float32)
         host_lse = self._pinned("lse", q.shape[:2], torch.float32)
-        if self.time_cpu_attention:
-            start_ns = time.perf_counter_ns()
+        intervals = self.cpu_attention_intervals
+        if self.time_cpu_attention or intervals is not None:
+            start_ns = time.monotonic_ns()
         if query_offsets is None:
             self.history.decode_state(layer, q_host, cpu_slots, cpu_lens, scale, out=host_out, lse=host_lse)
         else:
             self.history.decode_grouped_state(
                 layer, q_host, cpu_slots, cpu_lens, query_offsets, scale, out=host_out, lse=host_lse,
             )
-        if self.time_cpu_attention:
-            self.cpu_attention_ns += time.perf_counter_ns() - start_ns
+        if self.time_cpu_attention or intervals is not None:
+            end_ns = time.monotonic_ns()
+            if self.time_cpu_attention:
+                self.cpu_attention_ns += end_ns - start_ns
+            if intervals is not None:
+                intervals.append((start_ns, end_ns))
         with torch.cuda.stream(self.copy_stream):
             cpu_out = host_out.to(q.device, non_blocking=True)
             cpu_lse = host_lse.to(q.device, non_blocking=True)

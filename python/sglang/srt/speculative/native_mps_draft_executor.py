@@ -1,4 +1,4 @@
-"""Process transport for native GPU-only Draft lookahead on a fixed KV pool."""
+"""Process transport for native Draft lookahead on fixed GPU and shared CPU KV."""
 
 from dataclasses import MISSING, fields
 import atexit
@@ -6,6 +6,7 @@ import os
 import socket
 import time
 import traceback
+import weakref
 
 import torch
 from torch import multiprocessing as mp
@@ -14,32 +15,54 @@ from sglang.srt.speculative.spec_utils import fast_topk
 
 
 def _draft_process(pipe, port):
+    draft = None
     try:
         from sglang.srt.speculative.native_mps_draft_model import NativeMPSDraftModel
 
         draft = NativeMPSDraftModel(pipe.recv(), nccl_port=port)
         pipe.send(("ok", os.getpid()))
         tokens = None
+        cpu_rows = None
         while True:
             command = pipe.recv()
             if command is None:
                 break
-            frame, metadata, plan, reuse_previous = command
+            if command[0] == "history":
+                draft.set_cpu_history(command[1])
+                cpu_rows = None
+                pipe.send(("ok", None))
+                continue
+
+            mode, frame, metadata, plan, reuse_previous, reuse_cpu_rows = command
+            if mode != "forward":
+                raise ValueError(f"Unknown MPS Draft command: {mode}")
             if reuse_previous:
                 frame["input_ids"] = tokens.reshape(-1)
+            if reuse_cpu_rows:
+                if cpu_rows is None:
+                    raise RuntimeError("MPS Draft has no CPU slot rows to reuse")
+                plan["cpu_rows"] = cpu_rows
+            else:
+                cpu_rows = plan.get("cpu_rows")
             device = next(draft.runner.model.parameters()).device
-            with torch.no_grad(), torch.cuda.device(device):
-                begin = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
-                begin.record()
-                logits = draft.forward(frame, metadata, plan)
-                probs, tokens = fast_topk(torch.softmax(logits.next_token_logits, dim=-1), 1, dim=-1)
-                end.record()
-                end.synchronize()
-                end_ns = time.monotonic_ns()
-                start_ns = end_ns - round(begin.elapsed_time(end) * 1e6)
-            pipe.send(("ok", (start_ns, end_ns, probs, tokens, logits.hidden_states)))
-        draft.close()
+            cpu_intervals = []
+            draft.set_cpu_attention_intervals(cpu_intervals)
+            try:
+                with torch.no_grad(), torch.cuda.device(device):
+                    begin = torch.cuda.Event(enable_timing=True)
+                    end = torch.cuda.Event(enable_timing=True)
+                    cpu_before = draft.cpu_attention_ns
+                    begin.record()
+                    logits = draft.forward(frame, metadata, plan)
+                    probs, tokens = fast_topk(torch.softmax(logits.next_token_logits, dim=-1), 1, dim=-1)
+                    end.record()
+                    end.synchronize()
+                    end_ns = time.monotonic_ns()
+                    start_ns = end_ns - round(begin.elapsed_time(end) * 1e6)
+                    cpu_ns = draft.cpu_attention_ns - cpu_before
+            finally:
+                draft.set_cpu_attention_intervals(None)
+            pipe.send(("ok", (start_ns, end_ns, probs, tokens, logits.hidden_states, cpu_ns, cpu_intervals)))
     except EOFError:
         return
     except BaseException:
@@ -48,7 +71,11 @@ def _draft_process(pipe, port):
         except (EOFError, BrokenPipeError):
             pass
     finally:
-        pipe.close()
+        try:
+            if draft is not None:
+                draft.close()
+        finally:
+            pipe.close()
 
 
 def _descriptor(value, skip=()):
@@ -83,6 +110,8 @@ class NativeMPSDraftExecutor:
         self.process = context.Process(target=_draft_process, args=(child, port), daemon=True)
         self.process.start()
         child.close()
+        self._cpu_history = None
+        self._cpu_rows = None
         try:
             self.pipe.send(export_draft_model_state(runner))
             self.pid = self._receive(420)
@@ -99,16 +128,40 @@ class NativeMPSDraftExecutor:
             raise RuntimeError(f"MPS Draft worker {self.process.pid} failed:\n{value}")
         return value
 
+    def attach_cpu_history(self, history):
+        """Install the current history generation before a speculative round starts."""
+        if history is None:
+            raise ValueError("Cannot attach a missing Draft CPU history")
+        if self._cpu_history is not None and self._cpu_history() is history:
+            return
+        self.pipe.send(("history", history.export_descriptor()))
+        self._receive(120)
+        self._cpu_history = weakref.ref(history)
+        self._cpu_rows = None
+
+    def detach_cpu_history(self):
+        """Release the child view after the parent has drained the round."""
+        if self._cpu_history is not None:
+            self.pipe.send(("history", None))
+            self._receive(120)
+            self._cpu_history = None
+            self._cpu_rows = None
+
     def forward(self, frame, metadata, *, reuse_previous):
         plan = metadata.native_draft_spill_plan
-        if plan.cpu_rows or plan.cpu_queries:
-            raise RuntimeError("MPS comparison requires a fully GPU-resident Draft prefix")
+        if plan.cpu_rows and (self._cpu_history is None or self._cpu_history() is None):
+            raise RuntimeError("Attach the current CPU Draft history before processing a mixed plan")
         skip = ("token_to_kv_pool", "req_to_token_pool", "attn_backend")
         if reuse_previous:
             # An imported IPC tensor cannot be exported back to its producer.
             skip += ("input_ids",)
-        self.pipe.send((_descriptor(frame, skip), _descriptor(metadata),
-                        _descriptor(plan), reuse_previous))
+        # All phases share the long CPU slot lists. Only their query offsets
+        # change. Materialize the grouped tensors in the child process.
+        reuse_cpu_rows = bool(reuse_previous and plan.cpu_rows and plan.cpu_rows is self._cpu_rows)
+        skip_plan = ("cpu_groups", "cpu_rows") if reuse_cpu_rows else ("cpu_groups",)
+        self.pipe.send(("forward", _descriptor(frame, skip), _descriptor(metadata),
+                        _descriptor(plan, skip_plan), reuse_previous, reuse_cpu_rows))
+        self._cpu_rows = plan.cpu_rows
         return self._receive(120)
 
     def close(self):

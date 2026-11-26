@@ -90,6 +90,11 @@ class NativeRoundParallel:
             self.stream = self._spatial_streams[1]
         self.tp_group = make_lookahead_tp_group(worker.target_worker.model_runner.tp_group) if enabled else None
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="draft-lookahead") if enabled else None
+        from sglang.srt.speculative.native_mps_draft_history import create_shared_cpu_history
+
+        if self.spill.active:
+            raise ValueError("Select shared Draft history before the first KV allocation")
+        self.spill.history_factory = create_shared_cpu_history
         self.process_executor = None
         if enabled and os.getenv("SPECSTREAM_NATIVE_LOOKAHEAD_PROCESS", "0") == "1":
             from sglang.srt.speculative.native_mps_draft_executor import NativeMPSDraftExecutor
@@ -97,6 +102,7 @@ class NativeRoundParallel:
             if sm_limit or os.getenv("SPECSTREAM_NATIVE_JOINT_KV_GIB"):
                 raise ValueError("Native MPS lookahead requires unlimited SMs and a fixed KV layout")
             self.process_executor = NativeMPSDraftExecutor(worker.draft_model_runner, self.tp_group)
+            self.spill.release_shared_history = self.process_executor.detach_cpu_history
         self.trace = trace
         self.round_id = 0
         self.last_round_metrics = None
@@ -229,7 +235,7 @@ class NativeRoundParallel:
             batch.req_pool_indices, :int(lengths.max())
         ].cpu().numpy()
         history = [row[:n] for row, n in zip(table, lengths)]
-        protected = np.concatenate([row[-128:] for row in history])
+        protected = np.concatenate([row[-(spill.strict_gpu_tail or 128):] for row in history])
         spill._allocate_writes(logical.reshape(-1), protected)
         gpu_prefix, cpu_prefix = [], []
         for row in history:
@@ -398,6 +404,7 @@ class _Round:
         self.event_start = self.event_end = None
         self.process_target_start_ns = None
         self.process_target_end_ns = None
+        self.cpu_attention_intervals = []
         self.target_forward_submitted = threading.Event()
         self.cancelled = threading.Event()
         self.future = None
@@ -484,7 +491,7 @@ class _Round:
         self.gpu_only_scratch = self.owner.target_only_mapping and spill.cpu_resident_tokens == 0
         rows = torch.tensor(self.rows, dtype=torch.int64, device=device)
         current = batch.out_cache_loc.view(self.batch_size, self.width).index_select(0, rows).cpu().numpy()
-        protected = np.concatenate([row[-128:] for row in history])
+        protected = np.concatenate([row[-(spill.strict_gpu_tail or 128):] for row in history])
         unprotected_gpu = max(0, spill.gpu_slots - len(spill.gpu_free) - int(
             np.count_nonzero(spill.gpu_map[protected])
         ))
@@ -517,6 +524,9 @@ class _Round:
             chosen_history = [history[i] for i in self.rows]
             chosen_lengths = [lengths[i] for i in self.rows]
             self.make_batches(chosen_history, targets, chosen_lengths, device)
+            process = self.owner.process_executor
+            if process is not None and self.work[0][1].native_draft_spill_plan.cpu_rows:
+                process.attach_cpu_history(spill.history)
         except BaseException:
             self.abort()
             raise
@@ -608,7 +618,7 @@ class _Round:
         self.target_host_submitted_ns = time.monotonic_ns()
         self.target_forward_submitted.set()
         observer = None
-        if self.owner.process_executor is not None:
+        if self.event_end is not None:
             def observe_target_completion():
                 with torch.cuda.device(self.owner.device):
                     self.event_end.synchronize()
@@ -678,17 +688,26 @@ class _Round:
                     if i:
                         frame.input_ids = self.samples[-1][1].reshape(-1)
                     if process is not None:
-                        begin_ns, end_ns, probabilities, tokens, hidden = process.forward(
+                        (begin_ns, end_ns, probabilities, tokens, hidden,
+                         cpu_ns, cpu_intervals) = process.forward(
                             frame, metadata, reuse_previous=bool(i)
                         )
-                        self.steps.append((begin_ns, end_ns, 0))
+                        self.steps.append((begin_ns, end_ns, cpu_ns))
+                        self.cpu_attention_intervals.extend(cpu_intervals)
                         self.samples.append((probabilities, tokens, hidden))
                         continue
                     begin = torch.cuda.Event(enable_timing=True)
                     end = torch.cuda.Event(enable_timing=True)
                     cpu_start = self.owner.spill.cpu_attention_ns
                     begin.record()
-                    logits = runner.forward(frame, skip_attn_backend_init=True).logits_output
+                    split = self.owner.spill.split
+                    if split is not None:
+                        split.cpu_attention_intervals = self.cpu_attention_intervals
+                    try:
+                        logits = runner.forward(frame, skip_attn_backend_init=True).logits_output
+                    finally:
+                        if split is not None:
+                            split.cpu_attention_intervals = None
                     probabilities, tokens = fast_topk(torch.softmax(logits.next_token_logits, dim=-1), 1, dim=-1)
                     end.record()
                     self.steps.append((begin, end, self.owner.spill.cpu_attention_ns - cpu_start))
@@ -799,6 +818,20 @@ class _Round:
                 end_ns=end - anchor if is_process else round(self.event_start.elapsed_time(end) * 1e6),
                 draft_cpu_attention_ms=cpu_ns / 1e6,
             ))
+        target_done = self.process_target_end_ns
+        target_begin = (anchor if is_process else target_done - target_end)
+        trace["draft_cpu_intervals_ns"] = [
+            [start - target_begin, end - target_begin]
+            for start, end in self.cpu_attention_intervals
+        ]
+        trace["draft_cpu_attention_calls"] = len(self.cpu_attention_intervals)
+        trace["draft_cpu_attention_ms"] = sum(
+            end - start for start, end in self.cpu_attention_intervals
+        ) / 1e6
+        trace["draft_cpu_attention_target_overlap_ms"] = sum(
+            max(0, min(end, target_begin + target_end) - max(start, target_begin))
+            for start, end in self.cpu_attention_intervals
+        ) / 1e6
         trace["target_overlap_ms"] = sum(
             max(0, min(phase["end_ns"], target_end) - max(0, phase["start_ns"]))
             for phase in phases

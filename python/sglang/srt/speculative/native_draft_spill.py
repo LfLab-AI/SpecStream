@@ -50,6 +50,7 @@ class NativeDraftSpill:
         self.cpu_capacity = logical_slots
         self.rank = rank
         self.tp_threads = tp_threads
+        self.strict_gpu_tail = int(os.getenv("SPECSTREAM_NATIVE_STRICT_GPU_TAIL", "0"))
         self.gpu_map = None
         self.cpu_map = None
         self.cpu_attention_calls = 0
@@ -100,7 +101,8 @@ class NativeDraftSpill:
         # full logical lifetime, including after GPU capacity is returned.
         capacity = self.cpu_capacity
         self.cpu_free = list(range(capacity, 0, -1))
-        self.history = CpuHistoryAttention(
+        make_history = getattr(self, "history_factory", CpuHistoryAttention)
+        self.history = make_history(
             self.pool.layer_num, capacity + 1, self.pool.head_num,
             head_dim=self.pool.head_dim, dtype=self.pool.dtype,
             num_threads=self.tp_threads, tp_rank=self.rank,
@@ -112,6 +114,9 @@ class NativeDraftSpill:
             self._free(logical.cpu().numpy())
 
     def reset(self):
+        release_history = getattr(self, "release_shared_history", None)
+        if release_history is not None:
+            release_history()
         self._previous_cpu_attention_ns = self.cpu_attention_ns
         self.gpu_map = None
         self.cpu_map = None
@@ -188,25 +193,34 @@ class NativeDraftSpill:
                     victims = np.concatenate((ordinary, waiting, current))[:deficit]
             if len(victims) != deficit:
                 raise RuntimeError("Draft GPU pool cannot fit protected and new KV")
-            src = self.gpu_map[victims]
-            dst = torch.tensor(
-                [self.cpu_free.pop() for _ in victims], dtype=torch.int64, device="cpu"
-            )
-            src_gpu = torch.as_tensor(src, device=self.pool.device)
-            for layer in range(self.pool.layer_num):
-                k, v = self.pool.get_kv_buffer(self.pool.start_layer + layer)
-                self.history.store(
-                    layer, dst,
-                    k.index_select(0, src_gpu).cpu(),
-                    v.index_select(0, src_gpu).cpu(),
-                )
-            self.cpu_map[victims] = dst.numpy()
-            self.gpu_map[victims] = 0
-            self.gpu_free.extend(src.tolist())
-            self.spilled_records += deficit
+            self._migrate_gpu_victims(victims)
             if self.prompt_priority is not None:
                 self.prefill_own_evicted += int(np.count_nonzero(self.prompt_priority[victims] == 2))
         self.gpu_map[new] = [self.gpu_free.pop() for _ in new]
+
+    def _migrate_gpu_victims(self, victims):
+        count = len(victims)
+        if not count:
+            return
+        if count > len(self.cpu_free):
+            raise RuntimeError("Insufficient host Draft KV slots")
+        src = self.gpu_map[victims]
+        if np.any(src <= 0) or np.any(self.cpu_map[victims]):
+            raise RuntimeError("Draft migration requires committed GPU-only KV slots")
+        dst = torch.tensor([self.cpu_free.pop() for _ in victims], dtype=torch.int64, device="cpu")
+        src_gpu = torch.as_tensor(src, device=self.pool.device)
+        try:
+            for layer in range(self.pool.layer_num):
+                k, v = self.pool.get_kv_buffer(self.pool.start_layer + layer)
+                self.history.store(layer, dst, k.index_select(0, src_gpu).cpu(),
+                                   v.index_select(0, src_gpu).cpu())
+        except BaseException:
+            self.cpu_free.extend(reversed(dst.tolist()))
+            raise
+        self.cpu_map[victims] = dst.numpy()
+        self.gpu_map[victims] = 0
+        self.gpu_free.extend(src.tolist())
+        self.spilled_records += count
 
     def _allocate_for_batch(self, writes, protected, rows, q_lengths, mode):
         if self.prompt_priority is None:
@@ -258,7 +272,7 @@ class NativeDraftSpill:
             if not np.array_equal(writes, expected_writes):
                 raise RuntimeError("New Draft KV must be the causal suffix of each request")
             protected = np.concatenate(
-                [row[max(0, n - 128):n] for row, n in zip(rows, base_lengths)]
+                [row[max(0, n - (self.strict_gpu_tail or 128)):n] for row, n in zip(rows, base_lengths)]
             )
             active_prompts = self._allocate_for_batch(writes, protected, rows, q_lengths, batch.forward_mode)
             gpu_rows = []

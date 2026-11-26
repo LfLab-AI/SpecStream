@@ -195,6 +195,16 @@ class StandaloneWorker(EAGLEWorker):
 
             self._native_joint_resize = NativeTargetFirstResize(self, arena)
 
+    def _get_native_exact_tail(self, target, draft):
+        if not hasattr(self, "_native_exact_tail"):
+            self._native_exact_tail = None
+            size = int(os.getenv("SPECSTREAM_NATIVE_STRICT_GPU_TAIL", "0"))
+            if size:
+                from sglang.srt.speculative.native_exact_kv_tail import NativeExactKVTail
+
+                self._native_exact_tail = NativeExactKVTail(self, target, draft, size)
+        return self._native_exact_tail
+
     def _update_native_draft_graphs(self):
         spill = self._native_draft_spill
         if spill is None:
@@ -320,7 +330,16 @@ class StandaloneWorker(EAGLEWorker):
             self._native_segment_trace.flush()
         if self._native_joint_resize is not None:
             self._native_joint_resize.maybe_resize(batch)
+        tail = self._get_native_exact_tail(target_spill, spill)
+        strict_decode = tail is not None and batch.forward_mode.is_decode() and not batch.is_extend_in_batch
+        strict_prefill = tail is not None and (batch.forward_mode.is_extend() or batch.is_extend_in_batch)
+        if strict_decode:
+            tail.check(batch, "before_decode")
         result = super().forward_batch_generation(batch)
+        if strict_decode:
+            tail.check(batch, "after_decode")
+        elif strict_prefill:
+            tail.check(batch, "prefill")
         if trace:
             can_run_target_graph = result.can_run_cuda_graph
             row = {

@@ -215,6 +215,38 @@ class NativeMPSDraftModel:
             self.close()
             raise
 
+    def set_cpu_history(self, descriptor):
+        """Attach one rank-local immutable history generation from the scheduler."""
+        from sglang.srt.speculative.native_mps_draft_history import SharedCpuHistoryAttention
+        from sglang.srt.speculative.spectre.drafter.split_attention import SplitDraftAttention
+
+        spill = self.pool.native_draft_spill
+        if descriptor is None:
+            spill.split = None
+            spill.history = None
+            return
+
+        history = SharedCpuHistoryAttention.import_descriptor(descriptor, self.rank)
+        if (
+            history.num_layers != self.pool.layer_num
+            or history.num_kv_heads != self.pool.head_num
+            or history.head_dim != self.pool.head_dim
+            or history.dtype != self.pool.dtype
+        ):
+            raise ValueError("MPS CPU history and GPU Draft cache have different geometries")
+        spill.split = SplitDraftAttention(history, self.device)
+        spill.history = history
+
+    @property
+    def cpu_attention_ns(self):
+        return self.pool.native_draft_spill.cpu_attention_ns
+
+    def set_cpu_attention_intervals(self, intervals):
+        """Record rank-local CPU attention calls on the host monotonic clock."""
+        split = self.pool.native_draft_spill.split
+        if split is not None:
+            split.cpu_attention_intervals = intervals
+
     @torch.no_grad()
     def forward(self, frame_values, metadata_values, plan_values):
         """Use a parent-built phase descriptor and return local Draft logits."""
@@ -223,8 +255,13 @@ class NativeMPSDraftModel:
         from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
         from sglang.srt.speculative.native_draft_spill import DraftAttentionPlan
 
-        if plan_values.get("cpu_rows") or plan_values.get("cpu_queries") or plan_values.get("cpu_groups"):
-            raise ValueError("The MPS Draft worker only accepts all-GPU lookahead plans")
+        cpu_rows = plan_values.get("cpu_rows", ())
+        if len(cpu_rows) != len(plan_values.get("cpu_queries", ())):
+            raise ValueError("MPS Draft CPU slots and query rows must agree")
+        if cpu_rows and self.pool.native_draft_spill.history is None:
+            raise RuntimeError("MPS Draft received a CPU attention plan before attaching history")
+        if plan_values.get("cpu_groups"):
+            raise ValueError("MPS Draft CPU attention groups must be materialized locally")
         if frame_values["forward_mode"] != ForwardMode.DRAFT_EXTEND:
             raise ValueError("The MPS Draft worker expects native DRAFT_EXTEND lookahead")
 
@@ -258,6 +295,10 @@ class NativeMPSDraftModel:
         )
 
         torch.cuda.synchronize(self.device)
+        spill = getattr(getattr(self, "pool", None), "native_draft_spill", None)
+        if spill is not None:
+            spill.split = None
+            spill.history = None
         if self.tp_group is not None:
             self.tp_group.destroy()
             self.tp_group = None
